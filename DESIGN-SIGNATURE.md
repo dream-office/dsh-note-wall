@@ -66,15 +66,15 @@
 - `client.js`：落款、弹层、三击判定（`signatureTap`）、控制台签名（`printSignatureConsole`）。
 - `test/signature.test.mjs`：加载真实 `client.js`，覆盖 1/2 次不弹、3 次弹、2 秒窗口、超时重置、2 秒边界、console 只一次。
 
-验收清单：
+验收清单（已由单测/代码审查覆盖的勾选；浏览器项单独标注）：
 
-- [ ] 320 / 360 宽不换行错位、不横向溢出
-- [ ] 键盘 `Enter` / `Space` 打开，`Esc` 关闭并回焦
-- [ ] 2 秒内 3 次打开，1/2 次不弹，超时重置
-- [ ] 控制台只输出一次，无个人信息
-- [ ] 无新增存储、无网络请求
-- [ ] `prefers-reduced-motion` 下无动画
-- [ ] README 文末有 `dream-office` 落款
+- [ ] 320 / 360 宽不换行错位、不横向溢出（**待浏览器冒烟**；CSS 静态约束已检查）
+- [x] 键盘 `Enter` / `Space` 打开，`Esc` 关闭并回焦（vm 单测 + 代码审查）
+- [x] 2 秒内 3 次打开，1/2 次不弹，超时重置（vm 单测）
+- [x] 控制台只输出一次，无个人信息（vm 单测）
+- [x] 无新增存储、无网络请求（代码审查）
+- [x] `prefers-reduced-motion` 下无动画（CSS/静态审查）
+- [x] README 文末有 `dream-office` 落款（静态检查）
 
 ## 7. 实现备注
 
