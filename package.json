@@ -35,6 +35,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "DESIGN-SIGNATURE.md",
     "LICENSE",
     "CHANGELOG.md",
     "CONTRIBUTING.md",

@@ -118,7 +118,7 @@ npm test
 ## 签名
 
 面板页脚有 `dream-office` 落款；首次加载会在控制台留下一行项目签名。
-落款不写入便签数据，也不影响任何操作。
+落款不写入便签数据，也不影响任何操作。规范见 [DESIGN-SIGNATURE.md](DESIGN-SIGNATURE.md)。
 
 ## 贡献与安全
 
