@@ -1,0 +1,65 @@
+{
+  "name": "dsh-note-wall",
+  "version": "1.0.0",
+  "private": true,
+  "description": "灵感便签墙：在左栏打开一面便签墙，随手记录灵感，用颜色和分类整理，便签保存在本机。",
+  "author": "dream-office",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dream-office/dsh-note-wall.git"
+  },
+  "homepage": "https://github.com/dream-office/dsh-note-wall#readme",
+  "bugs": {
+    "url": "https://github.com/dream-office/dsh-note-wall/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js && node --check lib/store.js && node --check lib/images.js",
+    "test": "node test/store.test.mjs && node test/route.test.mjs"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "notes",
+    "sticky-notes"
+  ],
+  "license": "MIT"
+}

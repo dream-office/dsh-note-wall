@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# local runtime data
+.note-wall/
