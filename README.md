@@ -59,6 +59,8 @@
 git clone https://github.com/dream-office/dsh-note-wall.git
 ```
 
+本包**不发布到 npm**，从 GitHub 克隆安装。
+
 在本机 Harness 里用 `plugin_manager`：
 
 - 安装：`install_bundle`，`target` 指向克隆下来的 `dsh-note-wall` 目录（绝对路径）。
@@ -72,16 +74,21 @@ git clone https://github.com/dream-office/dsh-note-wall.git
 
 ## 开发
 
-```powershell
-& $node --check index.js
-& $node --check client.js
-& $node --check lib\store.js
-& $node --check lib\images.js
-& $node test\store.test.mjs
-& $node test\route.test.mjs
+```bash
+node --check index.js
+node --check client.js
+node --check lib/store.js
+node --check lib/images.js
+node test/store.test.mjs
+node test/route.test.mjs
 ```
 
-> 本机沙箱里 `node --test test\store.test.mjs` 会因 `spawn EPERM` 失败，直接执行测试文件即可（上面两条）。
+或：
+
+```bash
+npm run check
+npm test
+```
 
 - Host 半（`index.js`）只负责同源鉴权、请求解析和错误映射；存储与清理逻辑在 `lib/store.js`，图片格式识别在 `lib/images.js`。
 - Web 半（`client.js`）是手写的 module-loader 模块：只 `require('react')`，不 import 任何 Harness Client 包，
@@ -89,16 +96,24 @@ git clone https://github.com/dream-office/dsh-note-wall.git
   暗色主题下会降低便签混色强度，并让文字/输入控件用主题前景色的高不透明度混色，保证对比度。
 - 两半通过上面三条路由通信，图片在提交便签时先上传、拿到 id 后随便签保存；添加失败会尝试回收已上传的图片。
 
-## 兼容性
+## 兼容性与已知限制
 
-- 需要 Harness 提供 `ctx.webServer`（Web GUI），并使用 `exact` 与 `prefix` 两类路由。
+- 仅 Web GUI：需要 `ctx.webServer`，支持 `exact` 与 `prefix` 路由；没有 CLI / headless 形态。
 - 便签操作使用 `connection.requestRejection` 做请求准入；该服务缺失时回退到同源 Origin 校验。
-  回退只防浏览器跨站请求，不防本机进程伪造 `Host`/`Origin`，本机部署请保留 `connection` 服务。
+  回退只防浏览器跨站请求，不防本机进程伪造 `Host`/`Origin`；本机部署请保留 `connection` 服务。
+- 便签必须有文字；链接和图片是附件，暂不支持纯图片便签。
+- 单机单用户，无多用户 ACL；图片读取路由不带插件头，依赖不可猜的随机 UUID；数据明文存盘。
+- 同一 `$DSH_HOME` 建议只由一个 Harness 进程使用（无跨进程文件锁）；同一 home 下所有 profile 共用一面墙。
+- 上限：500 条 / 单条 500 字 / 分类 24 字 / 链接 2048 字 / 图片 3MB（PNG、JPEG、WebP、GIF）。
+- 暂无搜索、筛选、导出、分页；超过 500 条需先删。
+- 自动化测试只覆盖 Host + store（32 条）；client 暂无自动化测试，CI 不做浏览器/视觉验收。
+- 「动效」和「上次颜色」是浏览器本地偏好（`dsh-note-wall:prefs-v1`），不跨浏览器/profile 同步。
+- 正常添加失败会回收已上传图片；若进程在「上传成功、add 请求未发出」之间崩溃，可能留下未被引用的图片文件（无自动 GC）。
+- 自定义色为保证文字对比度，采用近中性底色 + 同色边框，不是整块浓色。
+- 开发/测试 Node ≥ 22（engines 已写）。
 
-## 开发与贡献
+## 贡献与安全
 
-- 语法检查：`npm run check`
-- 测试：`npm test`（Node 内置测试，无第三方依赖）
 - 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 安全问题：[SECURITY.md](SECURITY.md)
 
