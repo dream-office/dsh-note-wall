@@ -2,5 +2,11 @@
   "meta": {
     "title": "便签墙",
     "description": "在左栏打开一面便签墙，随手记录灵感，用颜色和分类整理，便签保存在本机。"
+  },
+  "signature": {
+    "author": "dream-office",
+    "about": "关于作者",
+    "quote": "把灵感，一张一张贴起来。",
+    "close": "关闭"
   }
 }

@@ -1,6 +1,23 @@
 # Changelog
 
-## 1.0.0 - 2026-11-09
+## [1.1.0] - 2026-11-09
+
+A 版签名彩蛋（见 `DESIGN-SIGNATURE.md`）。
+
+### 新增
+
+- 面板页脚 `dream-office` 落款（11.5px，默认 55% 不透明度，hover/聚焦恢复）
+- 三击落款（2 秒内 3 次）打开作者的一句话；键盘 Enter/Space 可直接打开；
+  Esc 或关闭按钮收起，焦点回到落款
+- 首次加载在控制台输出一次签名（模块级 flag，重复挂载不重复）
+- 弹层使用 `role="dialog"`，落款带 `aria-expanded` / `aria-controls` / `aria-haspopup`
+
+### 说明
+
+- 不写存储、不收集数据、不新增网络请求，不影响便签主流程
+- `prefers-reduced-motion` 下不播放动画
+
+## [1.0.0] - 2026-11-09
 
 首个开源版本。
 

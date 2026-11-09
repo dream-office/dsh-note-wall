@@ -1,4 +1,4 @@
-﻿window.__ModuleLoader__.load({
+window.__ModuleLoader__.load({
   id: 'dsh-note-wall',
   factory(require) {
     const React = require('react')
@@ -28,6 +28,15 @@
       maxImageBytes: 3 * 1024 * 1024,
     }
     const CLOCK_INTERVAL_MS = 30000
+
+    // A-version signature (see DESIGN-SIGNATURE.md): footer mark + console line
+    // + a three-tap author note. No storage, no network, no data collection.
+    const SIGNATURE_CLICK_COUNT = 3
+    const SIGNATURE_CLICK_WINDOW_MS = 2000
+    const SIGNATURE_PANEL_ID = 'nw-signature-note'
+    const SIGNATURE_QUOTE_ZH = '把灵感，一张一张贴起来。'
+    const SIGNATURE_QUOTE_EN = 'Pinning down inspiration, one note at a time.'
+    const SIGNATURE_CONSOLE_TEXT = 'dsh-note-wall · dream-office · 把灵感，一张一张贴起来'
 
     const TONES = [
       { key: 'amber', zh: '暖黄', en: 'Amber' },
@@ -87,6 +96,44 @@
       } catch (error) {
         // Preference persistence is optional; the page still works without it.
       }
+    }
+
+    /**
+     * Pure three-tap tracker for the footer signature. Keeps only the taps that
+     * are still inside the window; the third tap inside it opens the note and
+     * clears the streak. Exposed on a test-only global so the real client file
+     * can be exercised without a browser.
+     */
+    function signatureTap(taps, nowMs, windowMs) {
+      const span = typeof windowMs === 'number' && windowMs > 0 ? windowMs : SIGNATURE_CLICK_WINDOW_MS
+      const recent = []
+      const history = Array.isArray(taps) ? taps : []
+      for (const tap of history) {
+        if (typeof tap === 'number' && nowMs - tap <= span) recent.push(tap)
+      }
+      recent.push(nowMs)
+      if (recent.length >= SIGNATURE_CLICK_COUNT) return { taps: [], opened: true }
+      return { taps: recent.slice(-(SIGNATURE_CLICK_COUNT - 1)), opened: false }
+    }
+
+    let signatureConsolePrinted = false
+
+    function printSignatureConsole() {
+      if (signatureConsolePrinted) return
+      signatureConsolePrinted = true
+      try {
+        if (typeof console !== 'undefined' && typeof console.info === 'function') {
+          console.info(SIGNATURE_CONSOLE_TEXT)
+        }
+      } catch (error) {
+        // A console line must never block plugin activation.
+      }
+    }
+
+    if (typeof window !== 'undefined' && window.__DSH_NOTE_WALL_TEST__ && typeof window.__DSH_NOTE_WALL_TEST__ === 'object') {
+      window.__DSH_NOTE_WALL_TEST__.signatureTap = signatureTap
+      window.__DSH_NOTE_WALL_TEST__.signatureWindowMs = SIGNATURE_CLICK_WINDOW_MS
+      window.__DSH_NOTE_WALL_TEST__.signatureConsoleText = SIGNATURE_CONSOLE_TEXT
     }
 
     // ---------------------------------------------------------------------------
@@ -433,7 +480,7 @@
 .nw-root::-webkit-scrollbar{width:10px;height:10px}
 .nw-root::-webkit-scrollbar-track{background:transparent}
 .nw-root::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:999px}
-.nw-page{max-width:1120px;margin:0 auto;padding:28px 32px 48px;box-sizing:border-box;display:flex;flex-direction:column;gap:18px}
+.nw-page{max-width:1120px;margin:0 auto;padding:28px 32px 48px;box-sizing:border-box;display:flex;flex-direction:column;gap:18px;min-height:100%}
 .nw-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .nw-title{margin:0;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:.01em;color:var(--dsw-alias-label-primary)}
 .nw-sub{margin:4px 0 0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}
@@ -556,6 +603,19 @@
 .nw-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:52px 20px;border-radius:22px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);text-align:center}
 .nw-empty-title{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
 .nw-empty-hint{max-width:420px;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-secondary)}
+.nw-page-foot{display:flex;align-items:flex-end;justify-content:flex-start;margin-top:auto;padding-top:8px}
+.nw-signature-wrap{position:relative;display:inline-flex;flex-direction:column;align-items:flex-start;gap:8px;max-width:100%}
+.nw-signature{display:inline-flex;align-items:center;gap:7px;height:24px;padding:0 2px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11.5px;letter-spacing:.02em;opacity:.55;cursor:pointer;user-select:none}
+.nw-signature:hover,.nw-signature:focus-visible{opacity:1}
+.nw-signature:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-signature-mark{width:10px;height:10px;border-radius:3px;background:#5B57F0;flex:none}
+.nw-dark .nw-signature-mark{background:#8B87FF}
+.nw-signature-pop{display:flex;align-items:center;gap:12px;max-width:min(100%,360px);box-sizing:border-box;padding:10px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
+.nw-signature-quote{margin:0;font-size:13px;line-height:1.6;min-width:0;overflow-wrap:anywhere}
+.nw-signature-close{flex:none}
+.nw-motion .nw-signature{transition:opacity .12s ease}
+.nw-motion .nw-signature-pop{animation:nw-signature-in .16s ease-out}
+@keyframes nw-signature-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 @keyframes nw-spin{to{transform:rotate(360deg)}}
 .nw-motion .nw-compose{transition:background-color .18s ease}
 .nw-motion .nw-note{animation:nw-note-in .22s ease-out backwards;transition:transform .16s ease,border-color .18s ease,background-color .18s ease}
@@ -567,7 +627,7 @@
 @keyframes nw-pop{0%{transform:scale(.82)}100%{transform:scale(1)}}
 @keyframes nw-focus{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent)}100%{box-shadow:0 0 0 6px transparent}}
 @media (max-width:720px){.nw-page{padding:20px 16px 36px}.nw-compose{padding:16px 16px 12px;border-radius:18px}.nw-compose-input{min-height:76px;font-size:16.5px}.nw-compose-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-kbd{display:none}.nw-tag-input{width:104px}.nw-grid{grid-template-columns:1fr}.nw-count{font-size:11px}}
-@media (prefers-reduced-motion:reduce){.nw-swatch,.nw-note,.nw-note-actions,.nw-compose,.nw-add,.nw-spinner{transition:none;animation:none}.nw-motion .nw-note{animation:none;transform:none}.nw-motion .nw-note:hover{transform:none}.nw-motion .nw-compose:focus-within{animation:none}.nw-motion .nw-swatch-selected::before{animation:none}.nw-motion .nw-add:not(:disabled):active{transform:none}.nw-motion .nw-swatch:hover{transform:none}}
+@media (prefers-reduced-motion:reduce){.nw-swatch,.nw-note,.nw-note-actions,.nw-compose,.nw-add,.nw-spinner{transition:none;animation:none}.nw-motion .nw-note{animation:none;transform:none}.nw-motion .nw-note:hover{transform:none}.nw-motion .nw-compose:focus-within{animation:none}.nw-motion .nw-swatch-selected::before{animation:none}.nw-motion .nw-add:not(:disabled):active{transform:none}.nw-motion .nw-swatch:hover{transform:none}.nw-motion .nw-signature{transition:none}.nw-motion .nw-signature-pop{animation:none}}
 `
 
     function Styles() {
@@ -873,9 +933,14 @@
       const [confirming, setConfirming] = React.useState(null)
       const [reloadKey, setReloadKey] = React.useState(0)
       const [now, setNow] = React.useState(function () { return Date.now() })
+      const [signatureOpen, setSignatureOpen] = React.useState(false)
       const textareaRef = React.useRef(null)
       const fileRef = React.useRef(null)
       const colorInputRef = React.useRef(null)
+      const signatureButtonRef = React.useRef(null)
+      const signatureCloseRef = React.useRef(null)
+      const signatureWasOpenRef = React.useRef(false)
+      const signatureTapsRef = React.useRef([])
       const aliveRef = React.useRef(true)
       const limitsRef = React.useRef(DEFAULT_LIMITS)
       const loadSeqRef = React.useRef(0)
@@ -944,6 +1009,33 @@
         return function () { clearInterval(timer) }
       }, [])
 
+      React.useEffect(function () {
+        if (signatureOpen) {
+          signatureWasOpenRef.current = true
+          if (signatureCloseRef.current && typeof signatureCloseRef.current.focus === 'function') {
+            signatureCloseRef.current.focus()
+          }
+          return
+        }
+        if (signatureWasOpenRef.current) {
+          signatureWasOpenRef.current = false
+          if (signatureButtonRef.current && typeof signatureButtonRef.current.focus === 'function') {
+            signatureButtonRef.current.focus()
+          }
+        }
+      }, [signatureOpen])
+
+      React.useEffect(function () {
+        if (!signatureOpen) return function () {}
+        function onSignatureKeyDown(event) {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          setSignatureOpen(false)
+        }
+        document.addEventListener('keydown', onSignatureKeyDown)
+        return function () { document.removeEventListener('keydown', onSignatureKeyDown) }
+      }, [signatureOpen])
+
       function accept(value) {
         if (!value || !Array.isArray(value.notes)) return
         if (value.limits && typeof value.limits === 'object') {
@@ -997,6 +1089,32 @@
         const next = !motion
         setMotion(next)
         writePrefs({ motion: next, tone: tone })
+      }
+
+      function openSignature() {
+        signatureTapsRef.current = []
+        setSignatureOpen(true)
+      }
+
+      function closeSignature() {
+        signatureTapsRef.current = []
+        setSignatureOpen(false)
+      }
+
+      function onSignatureClick(event) {
+        if (signatureOpen) {
+          closeSignature()
+          return
+        }
+        // A keyboard-generated click (Enter/Space) opens immediately; the
+        // three-tap rule is only for pointer input.
+        if (event && event.detail === 0) {
+          openSignature()
+          return
+        }
+        const result = signatureTap(signatureTapsRef.current, Date.now(), SIGNATURE_CLICK_WINDOW_MS)
+        signatureTapsRef.current = result.taps
+        if (result.opened) openSignature()
       }
 
       function setComposeAttachment(file) {
@@ -1476,6 +1594,42 @@
                 }),
               )
             : null,
+          h('footer', { className: 'nw-page-foot', key: 'signature' },
+            h('div', { className: 'nw-signature-wrap' },
+              h('button', {
+                type: 'button',
+                className: 'nw-signature',
+                'aria-label': t('关于作者', 'About the author'),
+                'aria-haspopup': 'dialog',
+                'aria-expanded': signatureOpen,
+                'aria-controls': SIGNATURE_PANEL_ID,
+                title: t('关于作者', 'About the author'),
+                ref: signatureButtonRef,
+                onClick: onSignatureClick,
+              },
+                h('span', { className: 'nw-signature-mark', 'aria-hidden': 'true' }),
+                h('span', null, 'dream-office'),
+              ),
+              signatureOpen
+                ? h('div', {
+                    id: SIGNATURE_PANEL_ID,
+                    role: 'dialog',
+                    className: 'nw-signature-pop',
+                    'aria-label': t('关于作者', 'About the author'),
+                  },
+                    h('p', { className: 'nw-signature-quote' }, t(SIGNATURE_QUOTE_ZH, SIGNATURE_QUOTE_EN)),
+                    h('button', {
+                      type: 'button',
+                      className: 'nw-iconbtn nw-signature-close',
+                      'aria-label': t('关闭', 'Close'),
+                      title: t('关闭', 'Close'),
+                      ref: signatureCloseRef,
+                      onClick: closeSignature,
+                    }, h(CloseGlyph, { size: 14 })),
+                  )
+                : null,
+            ),
+          ),
         ),
       )
     }
@@ -1490,6 +1644,7 @@
     }
 
     function apply(ctx) {
+      printSignatureConsole()
       function label() {
         return isZhLocale(ctx) ? '便签墙' : 'Note wall'
       }

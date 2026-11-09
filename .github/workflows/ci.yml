@@ -31,3 +31,4 @@ jobs:
         run: |
           node test/store.test.mjs
           node test/route.test.mjs
+          node test/signature.test.mjs

@@ -11,6 +11,7 @@ node --check lib/store.js
 node --check lib/images.js
 node test/store.test.mjs
 node test/route.test.mjs
+node test/signature.test.mjs
 ```
 
 不需要安装依赖；测试用 Node 内置模块。

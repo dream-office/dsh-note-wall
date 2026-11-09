@@ -3,6 +3,8 @@
 在 DeepSeek Harness 左栏加一个**便签墙**入口：随手把灵感贴到墙上，用颜色和分类整理，并可以给便签加**链接**和**图片**。
 便签只保存在本机：页面不访问外部网络，文字和图片只在本机回环 HTTP 与文件系统之间传递，也不会写进任何会话日志。
 
+> 版本：**1.1.0** · MIT · Node >= 22.13
+
 ## 使用
 
 1. 点击左栏的便签图标打开「灵感便签墙」。
@@ -81,6 +83,7 @@ node --check lib/store.js
 node --check lib/images.js
 node test/store.test.mjs
 node test/route.test.mjs
+node test/signature.test.mjs
 ```
 
 或：
@@ -106,11 +109,16 @@ npm test
 - 同一 `$DSH_HOME` 建议只由一个 Harness 进程使用（无跨进程文件锁）；同一 home 下所有 profile 共用一面墙。
 - 上限：500 条 / 单条 500 字 / 分类 24 字 / 链接 2048 字 / 图片 3MB（PNG、JPEG、WebP、GIF）。
 - 暂无搜索、筛选、导出、分页；超过 500 条需先删。
-- 自动化测试只覆盖 Host + store（32 条）；client 暂无自动化测试，CI 不做浏览器/视觉验收。
+- 自动化测试覆盖 Host + store + 落款纯逻辑（39 条）；client 渲染/交互无自动化测试，CI 不做浏览器/视觉验收。
 - 「动效」和「上次颜色」是浏览器本地偏好（`dsh-note-wall:prefs-v1`），不跨浏览器/profile 同步。
 - 正常添加失败会回收已上传图片；若进程在「上传成功、add 请求未发出」之间崩溃，可能留下未被引用的图片文件（无自动 GC）。
 - 自定义色为保证文字对比度，采用近中性底色 + 同色边框，不是整块浓色。
 - 开发/测试 Node ≥ 22（engines 已写）。
+
+## 签名
+
+面板页脚有 `dream-office` 落款；首次加载会在控制台留下一行项目签名。
+落款不写入便签数据，也不影响任何操作。
 
 ## 贡献与安全
 
@@ -120,3 +128,7 @@ npm test
 ## 许可证
 
 [MIT](LICENSE) © dream-office
+
+---
+
+dream-office · 把灵感，一张一张贴起来。
