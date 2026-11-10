@@ -85,6 +85,7 @@ node test/store.test.mjs
 node test/route.test.mjs
 node test/signature.test.mjs
 node test/tool.test.mjs
+node test/settings.test.mjs
 node test/ui.test.mjs
 ```
 
@@ -111,7 +112,7 @@ npm test
 - 同一 `$DSH_HOME` 建议只由一个 Harness 进程使用（无跨进程文件锁）；同一 home 下所有 profile 共用一面墙。
 - 上限：500 条 / 单条 500 字 / 分类 24 字 / 链接 2048 字 / 图片 3MB（PNG、JPEG、WebP、GIF）。
 - 暂无搜索、筛选、导出、分页；超过 500 条需先删。
-- 自动化测试覆盖 Host + store + 落款/搜索/导入导出/卡片渲染（49 条）；client 浏览器交互仍无自动化测试，CI 不做浏览器/视觉验收。
+- 自动化测试覆盖 Host + store + 设置 + 落款/搜索/导入导出/卡片渲染（75 条）；client 浏览器交互仍无自动化测试，CI 不做浏览器/视觉验收。
 - 「动效」和「上次颜色」是浏览器本地偏好（`dsh-note-wall:prefs-v1`），不跨浏览器/profile 同步。
 - 正常添加失败会回收已上传图片；若进程在「上传成功、add 请求未发出」之间崩溃，可能留下未被引用的图片文件（无自动 GC）。
 - 自定义色为保证文字对比度，采用近中性底色 + 同色边框，不是整块浓色。

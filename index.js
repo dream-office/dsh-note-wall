@@ -1,7 +1,8 @@
 // dsh-note-wall — Host half.
 //
-// Three same-origin routes backed by a JSON note store and an image directory
-// under `$DSH_HOME` (one wall per home, shared by profiles using it):
+// Three same-origin routes backed by a JSON note store, its settings file and
+// an image directory under `$DSH_HOME` (one wall per home, shared by profiles
+// using it):
 //
 //   POST /plugins/dsh-note-wall/api        note actions (JSON)
 //   POST /plugins/dsh-note-wall/image      raw image upload
@@ -23,6 +24,7 @@ import {
   sniffImage,
 } from './lib/images.js'
 import { LIMITS, NoteError, NoteStore } from './lib/store.js'
+import { SettingsStore } from './lib/settings.js'
 
 const ROUTE_PATH = '/plugins/dsh-note-wall/api'
 const TRUST_HEADER = 'x-dsh-note-wall'
@@ -146,10 +148,16 @@ export function apply(ctx) {
   const dataDir = join(home, 'note-wall')
   const imagesDir = join(dataDir, 'images')
   const store = new NoteStore({ dir: dataDir, imagesDir, logger })
+  const settingsStore = new SettingsStore({ dir: dataDir, logger })
   let loadError
   const ready = store.load().catch((error) => {
     loadError = error
     logger.error?.('[note-wall] 便签存储无法加载', error)
+  })
+  let settingsError
+  const settingsReady = settingsStore.load().catch((error) => {
+    settingsError = error
+    logger.error?.('[note-wall] 便签墙设置无法加载', error)
   })
   const trusted = trustedRequest(ctx)
 
@@ -162,14 +170,35 @@ export function apply(ctx) {
     return store
   }
 
+  async function ensureSettings() {
+    await settingsReady
+    if (settingsError !== undefined) {
+      if (settingsError instanceof NoteError) throw settingsError
+      throw new NoteError('settings-unavailable', '便签墙设置无法加载，请查看 Harness 日志。')
+    }
+    return settingsStore
+  }
+
   function view() {
-    return { notes: store.list(), limits: { ...LIMITS } }
+    return { notes: store.list(), folders: store.listFolders(), limits: { ...LIMITS } }
   }
 
   const actions = {
     async state() {
       await ensureStore()
       return view()
+    },
+    async settings() {
+      await ensureSettings()
+      return { settings: settingsStore.get() }
+    },
+    async settingsUpdate(body) {
+      await ensureSettings()
+      return { settings: await settingsStore.update(body) }
+    },
+    async settingsReset() {
+      await ensureSettings()
+      return { settings: await settingsStore.reset() }
     },
     async add(body) {
       await ensureStore()
@@ -185,6 +214,26 @@ export function apply(ctx) {
       await ensureStore()
       const removed = await store.remove(body)
       return { ...view(), removed }
+    },
+    async folderAdd(body) {
+      await ensureStore()
+      const folder = await store.addFolder(body)
+      return { ...view(), folder }
+    },
+    async folderRename(body) {
+      await ensureStore()
+      const folder = await store.renameFolder(body)
+      return { ...view(), folder }
+    },
+    async folderRemove(body) {
+      await ensureStore()
+      const removed = await store.removeFolder(body)
+      return { ...view(), removed }
+    },
+    async moveNotes(body) {
+      await ensureStore()
+      const moved = await store.moveNotes(body)
+      return { ...view(), moved }
     },
     async discardImage(body) {
       await ensureStore()
@@ -221,7 +270,9 @@ export function apply(ctx) {
       if (error instanceof NoteError) {
         const status = error.code === 'body-too-large'
           ? 413
-          : error.code === 'store-unavailable' || error.code === 'store-corrupt-unreadable'
+          : error.code === 'store-unavailable'
+            || error.code === 'store-corrupt-unreadable'
+            || error.code === 'settings-unavailable'
             ? 503
             : 400
         sendJson(res, status, failure(error.code, error.message))
@@ -348,11 +399,13 @@ export function apply(ctx) {
   )
 
   // Host-side tool: lets the agent add a note without going through the page.
-  // v1.2.0 deliberately excludes images (upload stays a UI action).
+  // v1.2.0 deliberately excludes images (upload stays a UI action). It is also
+  // gated by the agentWrite setting, checked at call time, so installs that did
+  // not opt in never receive notes written by an agent.
   ctx.effect(
     () => ctx.tools.register({
       name: 'note_wall_add',
-      description: 'Add a sticky note to the Note wall. Use it for quick ideas or reminders; text is required. category is the note tag, color accepts the preset names (amber/peach/sky/mint/lilac/cream) or a #RRGGBB value, and link must be http(s). Images are not supported by this tool.',
+      description: 'Add a sticky note to the Note wall. Use it for quick ideas or reminders; text is required. category is the note tag, color accepts the preset names (amber/peach/sky/mint/lilac/cream) or a #RRGGBB value, and link must be http(s). remindAt accepts an ISO 8601 date-time or any parseable date and is stored as ISO. folderId targets an existing folder; folderName targets a folder by exact name and creates it when missing (folderId wins when both are given). Requires the user to enable agent writes in the note wall settings. Images are not supported by this tool.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -361,6 +414,9 @@ export function apply(ctx) {
           category: { type: 'string', description: 'Optional category/tag, up to 24 characters.' },
           color: { type: 'string', description: 'Optional note color: amber, peach, sky, mint, lilac, cream, or #RRGGBB.' },
           link: { type: 'string', description: 'Optional http/https link, up to 2048 characters.' },
+          remindAt: { type: 'string', description: 'Optional reminder time as an ISO 8601 date-time (or any parseable date); stored normalized to ISO.' },
+          folderId: { type: 'string', description: 'Optional existing folder id. Takes precedence over folderName.' },
+          folderName: { type: 'string', description: 'Optional folder name, up to 40 characters; created when no folder with that exact name exists.' },
         },
         required: ['text'],
       },
@@ -370,12 +426,28 @@ export function apply(ctx) {
       },
       async execute(args) {
         await ensureStore()
+        await ensureSettings()
+        if (!settingsStore.get().agentWrite.enabled) {
+          throw new NoteError('tool-disabled', '便签墙的「允许 AI 写入」未开启，请先在便签墙设置里打开。')
+        }
         const payload = args !== null && typeof args === 'object' ? args : {}
+        const providedFolderId = payload.folderId
+        const hasFolderId = typeof providedFolderId === 'string'
+          ? providedFolderId.trim().length > 0
+          : providedFolderId !== undefined && providedFolderId !== null
+        let folderId = hasFolderId ? providedFolderId : ''
+        if (!hasFolderId && typeof payload.folderName === 'string' && payload.folderName.trim().length > 0) {
+          const name = payload.folderName.trim()
+          const existing = store.listFolders().find(folder => folder.name === name)
+          folderId = existing !== undefined ? existing.id : (await store.addFolder({ name })).id
+        }
         const note = await store.add({
           text: payload.text,
           tag: payload.category,
           tone: payload.color,
           link: payload.link,
+          folderId,
+          remindAt: payload.remindAt,
         })
         return { note }
       },
@@ -384,7 +456,10 @@ export function apply(ctx) {
   )
 
   ctx.effect(
-    () => () => { void store.flush() },
-    'note-wall: flush note store on unload',
+    () => () => {
+      void store.flush()
+      void settingsStore.flush()
+    },
+    'note-wall: flush note store and settings on unload',
   )
 }

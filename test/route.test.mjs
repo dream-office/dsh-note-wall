@@ -201,12 +201,15 @@ test('state, add, update and remove round-trip and persist under DSH_HOME', asyn
     const empty = await call(route, { payload: { action: 'state' } })
     assert.equal(empty.status, 200)
     assert.deepEqual(empty.json.value.notes, [])
+    assert.deepEqual(empty.json.value.folders, [])
     assert.deepEqual(empty.json.value.limits, {
       maxNotes: 500,
       maxNoteChars: 500,
       maxTagChars: 24,
       maxLinkChars: 2048,
       maxImageBytes: 3 * 1024 * 1024,
+      maxFolders: 100,
+      maxFolderNameChars: 40,
     })
 
     const added = await call(route, {
@@ -221,7 +224,8 @@ test('state, add, update and remove round-trip and persist under DSH_HOME', asyn
     assert.match(note.id, /^[0-9a-f-]{36}$/)
 
     const stored = JSON.parse(await readFile(join(home, 'note-wall', 'store.json'), 'utf8'))
-    assert.equal(stored.version, 1)
+    assert.equal(stored.version, 2)
+    assert.deepEqual(stored.folders, [])
     assert.deepEqual(stored.notes, [note])
 
     const updated = await call(route, {
@@ -513,6 +517,178 @@ test('rejects a missing image reference and a stale edit through the API', async
     })
     assert.equal(updated.status, 200)
     assert.equal(updated.json.value.note.text, 'newer')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('folder actions and note folder/reminder fields round-trip through the API', async () => {
+  const { home, route, cleanup } = await setup()
+  try {
+    const created = await call(route, { payload: { action: 'folderAdd', name: '  工作  ' } })
+    assert.equal(created.status, 200)
+    assert.equal(created.json.value.folder.name, '工作')
+    assert.equal(created.json.value.folders.length, 1)
+    const folder = created.json.value.folder
+    assert.match(folder.id, /^[0-9a-f-]{36}$/)
+
+    const added = await call(route, {
+      payload: { action: 'add', text: '带提醒', folderId: folder.id, remindAt: '2026-02-03T04:05:06.000Z' },
+    })
+    assert.equal(added.status, 200)
+    assert.equal(added.json.value.note.folderId, folder.id)
+    assert.equal(added.json.value.note.remindAt, '2026-02-03T04:05:06.000Z')
+    assert.equal(added.json.value.folders.length, 1)
+    const noteId = added.json.value.note.id
+
+    const stored = JSON.parse(await readFile(join(home, 'note-wall', 'store.json'), 'utf8'))
+    assert.equal(stored.version, 2)
+    assert.deepEqual(stored.folders, [folder])
+
+    const renamed = await call(route, { payload: { action: 'folderRename', id: folder.id, name: '项目' } })
+    assert.equal(renamed.status, 200)
+    assert.equal(renamed.json.value.folder.name, '项目')
+
+    const updated = await call(route, {
+      payload: { action: 'update', id: noteId, folderId: '', remindAt: '2026-03-04' },
+    })
+    assert.equal(updated.status, 200)
+    assert.equal(updated.json.value.note.folderId, '')
+    assert.equal(updated.json.value.note.remindAt, '2026-03-04T00:00:00.000Z')
+
+    const moved = await call(route, {
+      payload: { action: 'moveNotes', ids: [noteId, 'missing-note'], folderId: folder.id },
+    })
+    assert.equal(moved.status, 200)
+    assert.deepEqual(moved.json.value.moved, { moved: 1 })
+    assert.equal(moved.json.value.notes.find(note => note.id === noteId).folderId, folder.id)
+
+    const removed = await call(route, { payload: { action: 'folderRemove', id: folder.id } })
+    assert.equal(removed.status, 200)
+    assert.equal(removed.json.value.removed, true)
+    assert.deepEqual(removed.json.value.folders, [])
+    assert.equal(removed.json.value.notes.length, 1)
+    assert.equal(removed.json.value.notes[0].folderId, '')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('maps folder and reminder validation failures to coded 400 responses', async () => {
+  const { route, cleanup } = await setup()
+  try {
+    const cases = [
+      [{ action: 'folderAdd', name: '   ' }, 'folder-name-required'],
+      [{ action: 'folderAdd', name: 'x'.repeat(41) }, 'folder-name-too-long'],
+      [{ action: 'folderRename', id: 'missing', name: '工作' }, 'folder-not-found'],
+      [{ action: 'folderRemove', id: 'missing' }, 'folder-not-found'],
+      [{ action: 'add', text: 'x', folderId: 'missing' }, 'note-folder-invalid'],
+      [{ action: 'add', text: 'x', remindAt: 'never' }, 'note-remind-invalid'],
+      [{ action: 'moveNotes', ids: 'nope', folderId: '' }, 'note-id-required'],
+      [{ action: 'moveNotes', ids: [], folderId: 'missing' }, 'note-folder-invalid'],
+    ]
+    for (const [payload, expected] of cases) {
+      const result = await call(route, { payload })
+      assert.equal(result.status, 400, JSON.stringify(payload))
+      assert.equal(result.json.error.code, expected, JSON.stringify(payload))
+    }
+
+    const created = await call(route, { payload: { action: 'folderAdd', name: '工作' } })
+    assert.equal(created.status, 200)
+    const duplicate = await call(route, { payload: { action: 'folderAdd', name: ' 工作 ' } })
+    assert.equal(duplicate.status, 400)
+    assert.equal(duplicate.json.error.code, 'folder-duplicate')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('serves a migrated v1 store with folders in state', async () => {
+  const handle = await setup({
+    async prepare(home) {
+      const storeDir = join(home, 'note-wall')
+      await mkdir(storeDir, { recursive: true })
+      const note = {
+        id: 'legacy',
+        text: '旧便签',
+        tag: '',
+        tone: 'amber',
+        createdAt: '2026-01-02T03:04:05.000Z',
+        updatedAt: '2026-01-02T03:04:05.000Z',
+      }
+      await writeFile(join(storeDir, 'store.json'), JSON.stringify({ version: 1, notes: [note] }), 'utf8')
+    },
+  })
+  try {
+    const state = await call(handle.route, { payload: { action: 'state' } })
+    assert.equal(state.status, 200)
+    assert.deepEqual(state.json.value.folders, [])
+    assert.equal(state.json.value.notes.length, 1)
+    assert.equal(state.json.value.notes[0].folderId, '')
+    assert.equal(state.json.value.notes[0].remindAt, '')
+  } finally {
+    await handle.cleanup()
+  }
+})
+
+test('settings default to agent write off, merge updates and reset', async () => {
+  const { home, route, cleanup } = await setup()
+  try {
+    const defaults = {
+      version: 1,
+      agentWrite: { enabled: false },
+      categoryHistory: { enabled: false, limit: 8 },
+      folders: { enabled: false },
+      imageDisplay: 'large',
+      reminders: { enabled: false, sound: false, volume: 0.7, notifications: false, overdue: true },
+      globalAlarm: { enabled: false, mode: 'overlay', sound: false },
+      motion: true,
+    }
+    const initial = await call(route, { payload: { action: 'settings' } })
+    assert.equal(initial.status, 200)
+    assert.deepEqual(initial.json.value.settings, defaults)
+    await assert.rejects(access(join(home, 'note-wall', 'settings.json')), 'reading settings must not create the file')
+
+    const updated = await call(route, {
+      payload: { action: 'settingsUpdate', agentWrite: { enabled: true }, reminders: { sound: true, volume: 0.4 } },
+    })
+    assert.equal(updated.status, 200)
+    assert.equal(updated.json.value.settings.agentWrite.enabled, true)
+    assert.equal(updated.json.value.settings.reminders.sound, true)
+    assert.equal(updated.json.value.settings.reminders.volume, 0.4)
+    assert.equal(updated.json.value.settings.reminders.enabled, false, 'a partial group keeps its siblings')
+
+    const stored = JSON.parse(await readFile(join(home, 'note-wall', 'settings.json'), 'utf8'))
+    assert.equal(stored.version, 1)
+    assert.equal(stored.agentWrite.enabled, true)
+
+    const reset = await call(route, { payload: { action: 'settingsReset' } })
+    assert.equal(reset.status, 200)
+    assert.deepEqual(reset.json.value.settings, defaults)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('maps invalid settings values to coded 400 responses', async () => {
+  const { route, cleanup } = await setup()
+  try {
+    const cases = [
+      [{ action: 'settingsUpdate', motion: 'yes' }, 'settings-value-invalid'],
+      [{ action: 'settingsUpdate', imageDisplay: 'huge' }, 'settings-value-invalid'],
+      [{ action: 'settingsUpdate', reminders: { volume: 2 } }, 'settings-value-invalid'],
+      [{ action: 'settingsUpdate', categoryHistory: { limit: 0 } }, 'settings-value-invalid'],
+      [{ action: 'settingsUpdate', globalAlarm: { mode: 'loud' } }, 'settings-value-invalid'],
+      [{ action: 'settingsUpdate', agentWrite: { enabled: 'true' } }, 'settings-value-invalid'],
+      [{ action: 'settingsUpdate', folders: null }, 'settings-value-invalid'],
+    ]
+    for (const [payload, expected] of cases) {
+      const result = await call(route, { payload })
+      assert.equal(result.status, 400, JSON.stringify(payload))
+      assert.equal(result.json.error.code, expected, JSON.stringify(payload))
+    }
+    const state = await call(route, { payload: { action: 'settings' } })
+    assert.equal(state.json.value.settings.agentWrite.enabled, false, 'rejected updates must not change settings')
   } finally {
     await cleanup()
   }

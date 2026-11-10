@@ -77,7 +77,8 @@ test('add trims text and tag, defaults to amber and persists', async () => {
   assert.deepEqual(reopened.list(), [note])
 
   const stored = JSON.parse(await readFile(join(dir, 'store.json'), 'utf8'))
-  assert.equal(stored.version, 1)
+  assert.equal(stored.version, 2)
+  assert.deepEqual(stored.folders, [])
   assert.equal(stored.notes.length, 1)
   assert.equal(stored.notes[0].id, note.id)
 })
@@ -359,4 +360,237 @@ test('a stale editor update is rejected instead of overwriting a newer note', as
     assertNoteError('note-conflict'),
   )
   assert.equal(store.list()[0].text, 'b')
+})
+
+// ---------------------------------------------------------------------------
+// v1 -> v2 migration, folders and reminders
+// ---------------------------------------------------------------------------
+
+test('a v1 store migrates to the v2 shape without rewriting the file', async () => {
+  const dir = await freshDir()
+  const legacy = seedNote(0, { id: 'legacy', text: '旧便签', tag: '旧', link: 'https://example.com/x' })
+  const original = JSON.stringify({ version: 1, notes: [legacy] }, null, 2)
+  await writeFile(join(dir, 'store.json'), original, 'utf8')
+  const { store } = await openStore({ dir })
+
+  const notes = store.list()
+  assert.equal(notes.length, 1)
+  assert.equal(notes[0].folderId, '')
+  assert.equal(notes[0].remindAt, '')
+  assert.equal(notes[0].text, '旧便签')
+  assert.equal(notes[0].tag, '旧')
+  assert.equal(notes[0].link, 'https://example.com/x')
+  assert.deepEqual(store.listFolders(), [])
+  assert.equal(await readFile(join(dir, 'store.json'), 'utf8'), original, 'loading a v1 file must be a pure read')
+
+  const added = await store.add({ text: '新便签' })
+  const stored = JSON.parse(await readFile(join(dir, 'store.json'), 'utf8'))
+  assert.equal(stored.version, 2)
+  assert.deepEqual(stored.folders, [])
+  assert.deepEqual(stored.notes.map(note => note.id), [added.id, 'legacy'])
+  assert.equal(stored.notes.find(note => note.id === 'legacy').folderId, '')
+  assert.equal(stored.notes.find(note => note.id === 'legacy').remindAt, '')
+})
+
+test('a v2 store keeps folders and note folder/reminder fields', async () => {
+  const dir = await freshDir()
+  const folderId = 'folder-keep'
+  const folder = { id: folderId, name: '  工作  ', createdAt: '2026-01-01T00:00:00.000Z' }
+  const duplicate = { id: folderId, name: '重复 id', createdAt: '2026-01-01T00:00:00.000Z' }
+  const badFolder = { id: '', name: '坏' }
+  const notes = [
+    seedNote(0, { id: 'in-folder', folderId, remindAt: '2026-02-03T04:05:06.000Z' }),
+    seedNote(1, { id: 'orphan', folderId: 'missing-folder' }),
+    seedNote(2, { id: 'bad-remind', remindAt: 'never' }),
+  ]
+  await writeFile(
+    join(dir, 'store.json'),
+    JSON.stringify({ version: 2, folders: [folder, duplicate, badFolder], notes }),
+    'utf8',
+  )
+  const { store } = await openStore({ dir })
+  assert.deepEqual(store.listFolders(), [
+    { id: folderId, name: '工作', createdAt: '2026-01-01T00:00:00.000Z' },
+  ])
+  const byId = new Map(store.list().map(note => [note.id, note]))
+  assert.equal(byId.get('in-folder').folderId, folderId)
+  assert.equal(byId.get('in-folder').remindAt, '2026-02-03T04:05:06.000Z')
+  assert.equal(byId.get('orphan').folderId, '', 'unknown folder ids fall back to 未分类')
+  assert.equal(byId.get('bad-remind').remindAt, '')
+})
+
+test('a v2 document without a folders array still loads', async () => {
+  const dir = await freshDir()
+  await writeFile(join(dir, 'store.json'), JSON.stringify({ version: 2, notes: [seedNote(0)] }), 'utf8')
+  const { store } = await openStore({ dir })
+  assert.equal(store.list().length, 1)
+  assert.deepEqual(store.listFolders(), [])
+})
+
+test('folders can be added, listed by name and renamed', async () => {
+  const { dir, store } = await openStore()
+  const work = await store.addFolder({ name: '  工作  ' })
+  assert.equal(work.name, '工作')
+  assert.equal(work.createdAt, new Date(BASE_MS).toISOString())
+  assert.match(work.id, /^[0-9a-f-]{36}$/)
+  const life = await store.addFolder({ name: '生活' })
+  const study = await store.addFolder({ name: '学习' })
+  assert.deepEqual(store.listFolders().map(folder => folder.name), ['学习', '工作', '生活'])
+
+  const copy = store.listFolders()
+  copy[0].name = 'changed'
+  copy.push({ id: 'extra', name: 'extra', createdAt: work.createdAt })
+  assert.equal(store.listFolders().length, 3, 'listFolders returns detached copies')
+
+  const renamed = await store.renameFolder({ id: life.id, name: '  日常  ' })
+  assert.equal(renamed.name, '日常')
+  assert.equal(store.listFolders().find(folder => folder.id === life.id).name, '日常')
+  const sameName = await store.renameFolder({ id: study.id, name: '学习' })
+  assert.equal(sameName.name, '学习', 'keeping a folder name is allowed')
+
+  const reopened = new NoteStore({ dir, logger: quietLogger })
+  await reopened.load()
+  assert.deepEqual(reopened.listFolders(), store.listFolders())
+
+  await assert.rejects(store.renameFolder({ id: 'missing', name: 'x' }), assertNoteError('folder-not-found'))
+  await assert.rejects(store.renameFolder({ id: study.id, name: '   ' }), assertNoteError('folder-name-required'))
+  await assert.rejects(
+    store.renameFolder({ id: study.id, name: 'x'.repeat(LIMITS.maxFolderNameChars + 1) }),
+    assertNoteError('folder-name-too-long'),
+  )
+  await assert.rejects(store.renameFolder({ id: study.id, name: '工作' }), assertNoteError('folder-duplicate'))
+})
+
+test('folder names are validated, case-sensitive and the folder count is capped', async () => {
+  const dir = await freshDir()
+  const seeded = Array.from({ length: LIMITS.maxFolders }, (_, index) => ({
+    id: `folder-${index}`,
+    name: `文件夹 ${index}`,
+    createdAt: new Date(BASE_MS + index).toISOString(),
+  }))
+  await writeFile(join(dir, 'store.json'), JSON.stringify({ version: 2, folders: seeded, notes: [] }), 'utf8')
+  const { store } = await openStore({ dir })
+  assert.equal(store.listFolders().length, LIMITS.maxFolders)
+  await assert.rejects(store.addFolder({ name: '再来一个' }), assertNoteError('folder-limit-reached'))
+
+  const { store: empty } = await openStore()
+  await assert.rejects(empty.addFolder({ name: '   ' }), assertNoteError('folder-name-required'))
+  await assert.rejects(empty.addFolder({}), assertNoteError('folder-name-required'))
+  await assert.rejects(
+    empty.addFolder({ name: 'x'.repeat(LIMITS.maxFolderNameChars + 1) }),
+    assertNoteError('folder-name-too-long'),
+  )
+  await empty.addFolder({ name: '工作' })
+  await assert.rejects(empty.addFolder({ name: ' 工作 ' }), assertNoteError('folder-duplicate'))
+  await empty.addFolder({ name: 'Work' })
+  const lower = await empty.addFolder({ name: 'work' })
+  assert.equal(lower.name, 'work', 'names are compared case-sensitively')
+})
+
+test('removing a folder clears note assignments but keeps the notes', async () => {
+  const { dir, store } = await openStore()
+  const folder = await store.addFolder({ name: '工作' })
+  const keep = await store.add({ text: '归档', folderId: folder.id })
+  const other = await store.add({ text: '未分类' })
+  assert.equal(await store.removeFolder({ id: folder.id }), true)
+  assert.deepEqual(store.listFolders(), [])
+  const notes = store.list()
+  assert.equal(notes.length, 2)
+  assert.equal(notes.find(note => note.id === keep.id).folderId, '')
+  assert.equal(notes.find(note => note.id === other.id).folderId, '')
+  assert.equal(notes.find(note => note.id === keep.id).text, '归档')
+
+  const reopened = new NoteStore({ dir, logger: quietLogger })
+  await reopened.load()
+  assert.deepEqual(reopened.list(), notes)
+  assert.deepEqual(reopened.listFolders(), [])
+  await assert.rejects(store.removeFolder({ id: folder.id }), assertNoteError('folder-not-found'))
+})
+
+test('moveNotes assigns folders once and skips unknown ids', async () => {
+  const { dir, store } = await openStore()
+  const work = await store.addFolder({ name: '工作' })
+  const first = await store.add({ text: 'a' })
+  const second = await store.add({ text: 'b' })
+  assert.deepEqual(
+    await store.moveNotes({ ids: [first.id, second.id, 'missing-note'], folderId: work.id }),
+    { moved: 2 },
+  )
+  const byId = new Map(store.list().map(note => [note.id, note]))
+  assert.equal(byId.get(first.id).folderId, work.id)
+  assert.equal(byId.get(second.id).folderId, work.id)
+
+  assert.deepEqual(await store.moveNotes({ ids: [first.id], folderId: '' }), { moved: 1 })
+  assert.equal(store.list().find(note => note.id === first.id).folderId, '')
+  assert.deepEqual(await store.moveNotes({ ids: [first.id], folderId: '' }), { moved: 0 })
+  assert.deepEqual(await store.moveNotes({ ids: [], folderId: work.id }), { moved: 0 })
+
+  await assert.rejects(store.moveNotes({ ids: 'nope', folderId: '' }), assertNoteError('note-id-required'))
+  await assert.rejects(
+    store.moveNotes({ ids: [second.id], folderId: 'missing' }),
+    assertNoteError('note-folder-invalid'),
+  )
+
+  const reopened = new NoteStore({ dir, logger: quietLogger })
+  await reopened.load()
+  assert.deepEqual(reopened.list(), store.list())
+  assert.deepEqual(reopened.listFolders(), store.listFolders())
+})
+
+test('add and update accept a folder and normalize a reminder time', async () => {
+  const { dir, store } = await openStore()
+  const folder = await store.addFolder({ name: '提醒' })
+  const note = await store.add({ text: '开会', folderId: folder.id, remindAt: '2026-02-03T04:05:06.000Z' })
+  assert.equal(note.folderId, folder.id)
+  assert.equal(note.remindAt, '2026-02-03T04:05:06.000Z')
+
+  const updated = await store.update({ id: note.id, folderId: '', remindAt: '2026-03-04' })
+  assert.equal(updated.folderId, '')
+  assert.equal(updated.remindAt, '2026-03-04T00:00:00.000Z')
+
+  const moved = await store.update({ id: note.id, folderId: folder.id })
+  assert.equal(moved.folderId, folder.id)
+  const cleared = await store.update({ id: note.id, remindAt: '' })
+  assert.equal(cleared.remindAt, '')
+
+  await assert.rejects(store.add({ text: 'x', folderId: 'missing' }), assertNoteError('note-folder-invalid'))
+  await assert.rejects(store.add({ text: 'x', folderId: 42 }), assertNoteError('note-folder-invalid'))
+  await assert.rejects(store.add({ text: 'x', remindAt: 'never' }), assertNoteError('note-remind-invalid'))
+  await assert.rejects(store.add({ text: 'x', remindAt: 1_700_000_000_000 }), assertNoteError('note-remind-invalid'))
+  await assert.rejects(
+    store.update({ id: note.id, folderId: 'missing-again' }),
+    assertNoteError('note-folder-invalid'),
+  )
+  await assert.rejects(store.update({ id: note.id, remindAt: 'not-a-date' }), assertNoteError('note-remind-invalid'))
+  await assert.rejects(store.update({ id: note.id }), assertNoteError('note-nothing-to-update'))
+
+  const reopened = new NoteStore({ dir, logger: quietLogger })
+  await reopened.load()
+  assert.deepEqual(reopened.list(), store.list())
+  assert.deepEqual(reopened.listFolders(), store.listFolders())
+})
+
+test('a failed write rolls folder and move changes back', async () => {
+  const { store } = await openStore()
+  const folder = await store.addFolder({ name: '工作' })
+  const note = await store.add({ text: 'keep', folderId: folder.id })
+  const foldersBefore = store.listFolders()
+  const notesBefore = store.list()
+
+  store.writeSnapshot = async () => {
+    throw new Error('disk full')
+  }
+
+  await assert.rejects(store.addFolder({ name: '生活' }), /disk full/)
+  assert.deepEqual(store.listFolders(), foldersBefore)
+
+  await assert.rejects(store.renameFolder({ id: folder.id, name: '改名' }), /disk full/)
+  assert.deepEqual(store.listFolders(), foldersBefore)
+
+  await assert.rejects(store.removeFolder({ id: folder.id }), /disk full/)
+  assert.deepEqual(store.listFolders(), foldersBefore)
+  assert.deepEqual(store.list(), notesBefore)
+
+  await assert.rejects(store.moveNotes({ ids: [note.id], folderId: '' }), /disk full/)
+  assert.deepEqual(store.list(), notesBefore)
 })

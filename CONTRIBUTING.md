@@ -13,6 +13,7 @@ node test/store.test.mjs
 node test/route.test.mjs
 node test/signature.test.mjs
 node test/tool.test.mjs
+node test/settings.test.mjs
 node test/ui.test.mjs
 ```
 
