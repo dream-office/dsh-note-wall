@@ -21,7 +21,7 @@
 
 ### 说明
 
-- 测试 118 通过（store 30 / route 17 / signature 7 / tool 5 / settings 10 / ui 31 / backup 18）。
+- 测试 120 通过（store 30 / route 17 / signature 7 / tool 5 / settings 10 / ui 33 / backup 18）。
 - ZIP 已用 Windows `Expand-Archive` 与 `tar` 验证可解压；浏览器通知权限、音频自动播放、overlay 层级仍需真人手验。
 
 ## [1.1.1] - 2026-11-10

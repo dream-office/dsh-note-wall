@@ -1590,13 +1590,14 @@ window.__ModuleLoader__.load({
 .nw-add:disabled{background:var(--dsw-alias-button-primary-dimmed);cursor:default}
 .nw-add:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 
-.nw-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));align-items:start}
-.nw-note{display:flex;flex-direction:column;gap:10px;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 42%,var(--dsw-alias-bg-layer-1));box-sizing:border-box}
+.nw-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));grid-auto-rows:1fr;align-items:stretch}
+.nw-note{display:flex;flex-direction:column;gap:10px;height:100%;min-height:248px;overflow:hidden;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 42%,var(--dsw-alias-bg-layer-1));box-sizing:border-box}
+.nw-note-editing{height:auto;overflow:visible}
 .nw-note:hover{border-color:var(--dsw-alias-border-l2)}
 .nw-note-editing:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-note-body{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0}
-.nw-note-tag{font-size:12px;font-weight:600;letter-spacing:.04em;color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent)}
-.nw-note-text{margin:0;font-size:16px;line-height:1.72;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary)}
+.nw-note-body{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0;overflow:hidden}
+.nw-note-tag{font-size:12px;font-weight:600;letter-spacing:.04em;color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-note-text{display:-webkit-box;margin:0;font-size:16px;line-height:1.72;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary);overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:4;max-height:calc(1.72em * 4)}
 .nw-note-thumb{display:block;width:96px;height:96px;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);flex:none}
 .nw-note-thumb img{display:block;width:100%;height:100%;object-fit:cover}
 .nw-note-thumb:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
@@ -1629,7 +1630,9 @@ window.__ModuleLoader__.load({
 .nw-mini{height:26px;padding:0 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11px;cursor:pointer}
 .nw-mini:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .nw-mini:disabled{opacity:.6;cursor:default}
-.nw-mini:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-toolbar .nw-mini{height:32px;min-height:32px;padding:0 12px;white-space:nowrap;flex:none;gap:6px;display:inline-flex;align-items:center;justify-content:center;line-height:1}
+.nw-folder-toggle,.nw-select-toggle{min-width:max-content;padding:0 14px;gap:8px}
+.nw-folder-filter{min-width:112px}
 .nw-mini-primary{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base)}
 .nw-mini-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
 .nw-mini-danger{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-secondary)}
@@ -1695,7 +1698,7 @@ window.__ModuleLoader__.load({
 .nw-import-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:2px}
 
 .nw-note-image{display:block;width:100%;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2)}
-.nw-note-image img{display:block;width:100%;max-height:190px;height:auto;object-fit:cover}
+.nw-note-image img{display:block;width:100%;max-height:120px;height:auto;object-fit:cover}
 .nw-note-image:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .nw-note-thumb-icon{border-radius:8px}
 
@@ -1731,6 +1734,7 @@ window.__ModuleLoader__.load({
 @keyframes nw-pop{0%{transform:scale(.82)}100%{transform:scale(1)}}
 @keyframes nw-focus{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent)}100%{box-shadow:0 0 0 6px transparent}}
 @media (max-width:720px){.nw-page{padding:20px 16px 36px}.nw-compose{padding:16px 16px 12px;border-radius:18px}.nw-compose-input{min-height:76px;font-size:16.5px}.nw-compose-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-kbd{display:none}.nw-tag-input{width:104px}.nw-grid{grid-template-columns:1fr}.nw-count{font-size:11px}}
+@media (max-width:420px){.nw-toolbar .nw-search{flex-basis:100%}.nw-toolbar .nw-filter{flex:1 1 46%;min-width:0}.nw-toolbar-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-folder-toggle,.nw-select-toggle{min-width:max-content;padding:0 12px}}
 @media (prefers-reduced-motion:reduce){.nw-swatch,.nw-note,.nw-note-actions,.nw-compose,.nw-add,.nw-spinner{transition:none;animation:none}.nw-motion .nw-note{animation:none;transform:none}.nw-motion .nw-note:hover{transform:none}.nw-motion .nw-compose:focus-within{animation:none}.nw-motion .nw-swatch-selected::before{animation:none}.nw-motion .nw-add:not(:disabled):active{transform:none}.nw-motion .nw-swatch:hover{transform:none}.nw-motion .nw-signature{transition:none}.nw-motion .nw-signature-pop{animation:none}}
 `
 
@@ -4257,7 +4261,7 @@ window.__ModuleLoader__.load({
             ),
             foldersEnabled
               ? h('select', {
-                  className: 'nw-filter',
+                  className: 'nw-filter nw-folder-filter',
                   value: filterFolder,
                   'aria-label': t('按文件夹筛选', 'Filter by folder'),
                   onChange: function (event) { setFilterFolder(event.target.value) },
@@ -4272,7 +4276,7 @@ window.__ModuleLoader__.load({
             foldersEnabled
               ? h('button', {
                   type: 'button',
-                  className: 'nw-mini' + (folderPanelOpen ? ' nw-mini-primary' : ''),
+                  className: 'nw-mini nw-folder-toggle' + (folderPanelOpen ? ' nw-mini-primary' : ''),
                   'aria-expanded': folderPanelOpen,
                   'aria-pressed': folderPanelOpen,
                   title: t('管理文件夹', 'Manage folders'),
@@ -4286,7 +4290,7 @@ window.__ModuleLoader__.load({
             foldersEnabled
               ? h('button', {
                   type: 'button',
-                  className: 'nw-mini' + (selectionMode ? ' nw-mini-primary' : ''),
+                  className: 'nw-mini nw-select-toggle' + (selectionMode ? ' nw-mini-primary' : ''),
                   'aria-pressed': selectionMode,
                   title: t('多选便签并移入文件夹', 'Select notes and move them into a folder'),
                   onClick: toggleSelectionMode,

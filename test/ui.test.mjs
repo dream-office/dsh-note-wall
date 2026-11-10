@@ -564,6 +564,35 @@ test('enabling folders adds the folder filter, manager and selection controls', 
     1,
     'selection mode toggle should appear',
   )
+  const folderFilter = nodes.find(function (node) {
+    return node.props && node.props['aria-label'] === '按文件夹筛选'
+  })
+  assert.match(folderFilter.props.className, /\bnw-folder-filter\b/)
+  const folderToggle = nodes.find(function (node) {
+    return node.props && typeof node.props.className === 'string' && node.props.className.split(/\s+/).indexOf('nw-folder-toggle') >= 0
+  })
+  assert.ok(folderToggle, 'folder manager should use the widened toolbar class')
+  const selectToggle = nodes.find(function (node) {
+    return node.props && typeof node.props.className === 'string' && node.props.className.split(/\s+/).indexOf('nw-select-toggle') >= 0
+  })
+  assert.ok(selectToggle, 'selection mode should use the widened toolbar class')
+})
+
+test('cards use one uniform height, clamped text and a bottom action baseline', async () => {
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /\.nw-grid\{[^}]*grid-auto-rows:1fr[^}]*align-items:stretch\}/)
+  assert.match(source, /\.nw-note\{[^}]*height:100%;min-height:248px;overflow:hidden/)
+  assert.match(source, /\.nw-note-body\{[^}]*overflow:hidden/)
+  assert.match(source, /\.nw-note-text\{[^}]*-webkit-line-clamp:4[^}]*max-height:calc\(1\.72em \* 4\)/)
+  assert.match(source, /\.nw-note-foot\{[^}]*margin-top:auto/)
+})
+
+test('folder controls share a 32px tall, no-wrap toolbar row', async () => {
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /\.nw-toolbar \.nw-mini\{[^}]*height:32px[^}]*white-space:nowrap/)
+  assert.match(source, /\.nw-folder-toggle,\.nw-select-toggle\{[^}]*padding:0 14px;gap:8px/)
+  assert.match(source, /\.nw-folder-filter\{min-width:112px\}/)
+  assert.match(source, /@media \(max-width:420px\)\{[\s\S]*?\.nw-folder-toggle,\.nw-select-toggle\{min-width:max-content/)
 })
 
 // --- v1.2.0-C: complete backup ZIP, settings.section, first-use guide,
