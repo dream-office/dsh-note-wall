@@ -50,15 +50,19 @@ async function setup(options = {}) {
   assert.equal(routes.length, 3, 'expected the note, upload and image routes')
   const route = routes.find(entry => entry.kind === 'exact' && entry.path === '/plugins/dsh-note-wall/api')
   const uploadRoute = routes.find(entry => entry.kind === 'exact' && entry.path === '/plugins/dsh-note-wall/image')
-  const imageRoute = routes.find(entry => entry.kind === 'prefix' && entry.path === '/plugins/dsh-note-wall/image/')
+  const imageRoute = routes.find(entry => entry.kind === 'prefix' && entry.path === '/plugins/dsh-note-wall/image')
   assert.ok(route, 'note API route missing')
   assert.ok(uploadRoute, 'image upload route missing')
   assert.ok(imageRoute, 'image read route missing')
+  assert.equal(imageRoute.kind, 'prefix')
+  assert.equal(imageRoute.path, '/plugins/dsh-note-wall/image')
+  assert.equal(imageRoute.path.endsWith('/'), false, 'prefix route must not end with a slash')
   return {
     home,
     route,
     uploadRoute,
     imageRoute,
+    routes,
     async cleanup() {
       for (const dispose of effects) {
         if (typeof dispose === 'function') dispose()
@@ -138,6 +142,22 @@ async function call(route, { payload, method, headers, body, url } = {}) {
     json = undefined
   }
   return { status: res.status, headers: res.headers, body: res.body, raw: res.raw, json }
+}
+
+// Mirrors @deepseek-ai/dsh-host-webserver's HTTP match: the exact table first,
+// then the longest prefix where `pathname === prefix || pathname.startsWith(
+// prefix + '/')`. The trailing-slash rule is exactly what the v1.1.0 image
+// route got wrong.
+function matchRegisteredRoute(routes, pathname) {
+  const exact = routes.find(entry => entry.kind === 'exact' && entry.path === pathname)
+  if (exact !== undefined) return exact
+  let best
+  for (const entry of routes) {
+    if (entry.kind !== 'prefix') continue
+    if (entry.path !== pathname && !pathname.startsWith(`${entry.path}/`)) continue
+    if (best === undefined || entry.path.length > best.path.length) best = entry
+  }
+  return best
 }
 
 test('rejects requests without the plugin header, wrong origin, wrong method and wrong type', async () => {
@@ -307,6 +327,32 @@ test('honours a connection admission service when present', async () => {
     assert.deepEqual(allowed.json.value.notes, [])
   } finally {
     await second.cleanup()
+  }
+})
+
+test('image prefix route matches the real request path and serves the bytes', async () => {
+  const { uploadRoute, imageRoute, routes, cleanup } = await setup()
+  try {
+    const uploaded = await call(uploadRoute, { body: PNG_BYTES, headers: imageHeaders() })
+    assert.equal(uploaded.status, 200)
+    const id = uploaded.json.value.id
+    assert.match(id, /^[0-9a-f-]{36}\.png$/)
+
+    const requestPath = '/plugins/dsh-note-wall/image/' + id
+    const matched = matchRegisteredRoute(routes, requestPath)
+    assert.equal(matched, imageRoute, 'the registered prefix must match /image/<id>')
+
+    const served = await call(matched, {
+      method: 'GET',
+      headers: {},
+      body: '',
+      url: requestPath,
+    })
+    assert.equal(served.status, 200)
+    assert.equal(served.headers['content-type'], 'image/png')
+    assert.deepEqual(served.raw, PNG_BYTES)
+  } finally {
+    await cleanup()
   }
 })
 

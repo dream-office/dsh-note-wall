@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.1] - 2026-11-10
+
+### 修复
+
+- 图片读取 prefix 路由改为不带结尾斜杠的 `IMAGE_UPLOAD_PATH` 注册。
+  `dsh-host-webserver` 的前缀匹配是 `pathname === prefix || pathname.startsWith(prefix + '/')`；
+  旧路径 `.../image/` 实际要求 `.../image//<id>`，导致 `/image/<id>` 落入 SPA fallback，
+  便签卡片图片 404 / 裂图。client URL 与 `imageHandler` 切片逻辑不变。
+- 新增路由回归测试：prefix 路径不得以 `/` 结尾，并按 webServer 的 match 规则选出路由后
+  真正调用 handler（不再只直调 handler）。
+
+### 说明
+
+- 测试 40 通过（store 21 / route 12 / signature 7）。
+- v1.1.0 的 tarball / Release 带此 bug，marketplace 请使用 1.1.1。
+
 ## [1.1.0] - 2026-11-09
 
 A 版签名彩蛋（见 `DESIGN-SIGNATURE.md`）。

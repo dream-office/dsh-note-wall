@@ -338,8 +338,12 @@ export function apply(ctx) {
     'note-wall: image upload route',
   )
 
+  // The webServer match appends '/' to a prefix (`pathname === prefix ||
+  // pathname.startsWith(prefix + '/')`), so the registered prefix must not
+  // carry a trailing slash. IMAGE_PATH_PREFIX (with the slash) stays for URL
+  // building and for slicing the id inside imageHandler.
   ctx.effect(
-    () => ctx.webServer.register({ kind: 'prefix', path: IMAGE_PATH_PREFIX, handler: imageHandler }),
+    () => ctx.webServer.register({ kind: 'prefix', path: IMAGE_UPLOAD_PATH, handler: imageHandler }),
     'note-wall: image read route',
   )
 
