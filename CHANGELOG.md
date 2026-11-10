@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.2.0] - 2026-11-10
+
+### 新增
+
+- 搜索：正文 / 标签 / 链接；颜色、分类、文件夹筛选可叠加。
+- 卡片图片模式：缩略图（默认）/ 小图标 / 大图；编辑态始终完整预览。
+- 文件夹：新建 / 重命名 / 删除（删夹不删便签）、选择模式批量移入、按文件夹筛选。
+- 提醒：datetime 选择、到点检查、过期补提醒；浏览器通知与提示音可独立开关；`shell.overlay` 全局提醒（独立 id `note-wall-reminders`，不写 body/head）。
+- 分类历史：最近分类 chips，保留数量 4/8/12。
+- 设置：便签墙右上角面板 + DSH `settings.section` 页；持久化、恢复默认、首次引导。
+- `note_wall_add`：新增 `remindAt` / `folderId` / `folderName`；**AI 写入默认关闭**，Host 侧按设置真正 gate。
+- ZIP 完整备份：`notes.json` + `images/` + `manifest.json` + 可选 `settings.json`；替换前自动备份、合并不删除；路径穿越、zip bomb、损坏包校验。
+
+### 数据
+
+- store v1 → v2：新增 `folders[]`、note `folderId` / `remindAt`；旧数据迁移到未分类。
+- 可选新功能默认关闭：分类历史、文件夹、提醒、全局闹钟、AI 写入；图片默认缩略图。
+- 不新增运行时依赖；ZIP 使用 Node 内置能力手写容器。
+
+### 说明
+
+- 测试 118 通过（store 30 / route 17 / signature 7 / tool 5 / settings 10 / ui 31 / backup 18）。
+- ZIP 已用 Windows `Expand-Archive` 与 `tar` 验证可解压；浏览器通知权限、音频自动播放、overlay 层级仍需真人手验。
+
 ## [1.1.1] - 2026-11-10
 
 ### 修复

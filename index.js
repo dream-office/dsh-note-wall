@@ -1,12 +1,14 @@
 // dsh-note-wall — Host half.
 //
-// Three same-origin routes backed by a JSON note store, its settings file and
-// an image directory under `$DSH_HOME` (one wall per home, shared by profiles
+// Same-origin routes backed by a JSON note store, its settings file and an
+// image directory under `$DSH_HOME` (one wall per home, shared by profiles
 // using it):
 //
 //   POST /plugins/dsh-note-wall/api        note actions (JSON)
 //   POST /plugins/dsh-note-wall/image      raw image upload
 //   GET  /plugins/dsh-note-wall/image/<id> the uploaded bytes (prefix route)
+//   GET  /plugins/dsh-note-wall/backup     ZIP export of the wall
+//   POST /plugins/dsh-note-wall/backup     ZIP import (replace or merge)
 //
 // The Web half (client.js) owns all presentation; this file owns request
 // admission, validation hand-off and error mapping. Nothing here touches a
@@ -16,6 +18,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { BACKUP_LIMITS, BackupService } from './lib/backup.js'
 import {
   IMAGE_ID_PATTERN,
   IMAGE_PATH_PREFIX,
@@ -27,9 +30,11 @@ import { LIMITS, NoteError, NoteStore } from './lib/store.js'
 import { SettingsStore } from './lib/settings.js'
 
 const ROUTE_PATH = '/plugins/dsh-note-wall/api'
+const BACKUP_PATH = '/plugins/dsh-note-wall/backup'
 const TRUST_HEADER = 'x-dsh-note-wall'
 const MAX_BODY_BYTES = 256 * 1024
 const UPLOAD_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const ZIP_TYPES = new Set(['application/zip', 'application/x-zip-compressed'])
 
 function readService(ctx, name) {
   if (ctx === undefined || ctx === null) return undefined
@@ -60,6 +65,41 @@ function notFound(res) {
     'cache-control': 'no-store',
   })
   res.end('Not found')
+}
+
+function sendZip(res, buffer, filename) {
+  res.writeHead(200, {
+    'content-type': 'application/zip',
+    'content-length': buffer.length,
+    'content-disposition': `attachment; filename="${filename}"`,
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(buffer)
+}
+
+/** Query string of a request, parsed without trusting its base URL. */
+function queryParams(req) {
+  const url = typeof req.url === 'string' ? req.url : ''
+  const index = url.indexOf('?')
+  return new URLSearchParams(index < 0 ? '' : url.slice(index + 1))
+}
+
+function parseBooleanQuery(params, name, fallback) {
+  const raw = params.get(name)
+  if (raw === null) return fallback
+  if (raw === '0') return false
+  if (raw === '1') return true
+  throw new NoteError('backup-query-invalid', `查询参数 ${name} 只能是 0 或 1。`)
+}
+
+function backupStatus(code) {
+  if (code === 'backup-too-large') return 413
+  if (code === 'store-unavailable' || code === 'store-corrupt-unreadable' || code === 'settings-unavailable') {
+    return 503
+  }
+  if (code === 'backup-safety-failed' || code === 'backup-settings-failed') return 500
+  return 400
 }
 
 /** Shared request-body reader: bounded, abort-aware, and always settles once. */
@@ -160,6 +200,7 @@ export function apply(ctx) {
     logger.error?.('[note-wall] 便签墙设置无法加载', error)
   })
   const trusted = trustedRequest(ctx)
+  const backupService = new BackupService({ store, settingsStore, dataDir, imagesDir, logger })
 
   async function ensureStore() {
     await ready
@@ -339,6 +380,72 @@ export function apply(ctx) {
     }
   }
 
+  /**
+   * ZIP backup: GET streams the current wall, POST restores an archive. Both
+   * use the same admission as the JSON API. The archive is parsed and validated
+   * completely before a replace touches the wall; a replace writes a safety
+   * backup of the current wall first and aborts if that backup fails.
+   */
+  async function backupHandler(req, res) {
+    try {
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        res.writeHead(405, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          allow: 'GET, POST',
+        })
+        res.end(JSON.stringify(failure('method-not-allowed', '只接受 GET 或 POST。')))
+        return
+      }
+      if (!trusted(req) || req.headers[TRUST_HEADER] !== '1') {
+        sendJson(res, 403, failure('forbidden', '请求未通过同源校验。'))
+        return
+      }
+      await ensureStore()
+      await ensureSettings()
+
+      const params = queryParams(req)
+      if (req.method === 'GET') {
+        // `settings=0` leaves the wall settings out of the export.
+        const includeSettings = parseBooleanQuery(params, 'settings', true)
+        const archive = await backupService.exportArchive({ includeSettings })
+        sendZip(res, archive.buffer, archive.filename)
+        return
+      }
+
+      const declared = typeof req.headers['content-type'] === 'string'
+        ? req.headers['content-type'].split(';')[0].trim().toLowerCase()
+        : ''
+      if (!ZIP_TYPES.has(declared)) {
+        sendJson(res, 415, failure('unsupported-media-type', '备份导入必须是 ZIP 压缩包。'))
+        return
+      }
+      const mode = params.get('mode')
+      if (mode !== 'replace' && mode !== 'merge') {
+        sendJson(res, 400, failure('backup-mode-invalid', '导入模式 mode 必须是 replace 或 merge。'))
+        return
+      }
+      // Undefined keeps the documented default: replace applies settings when
+      // settings.json is present, merge never applies them unless asked to.
+      const applySettings = parseBooleanQuery(params, 'applySettings', undefined)
+      const body = await readBody(
+        req,
+        BACKUP_LIMITS.maxArchiveBytes,
+        'backup-too-large',
+        '备份压缩包不能超过 64 MB。',
+      )
+      const value = await backupService.importArchive(body, { mode, applySettings })
+      sendJson(res, 200, { ok: true, value: { ...value, ...view() } })
+    } catch (error) {
+      if (error instanceof NoteError) {
+        sendJson(res, backupStatus(error.code), failure(error.code, error.message))
+        return
+      }
+      logger.error?.('[note-wall] 处理备份请求失败', error)
+      sendJson(res, 500, failure('internal', '备份操作失败，请查看 Harness 日志。'))
+    }
+  }
+
   // Image bytes are served without the plugin header because an <img> request
   // cannot send custom headers. Ids are random UUIDs, there is no listing route,
   // and the handler only reads from the plugin's own images directory.
@@ -387,6 +494,11 @@ export function apply(ctx) {
   ctx.effect(
     () => ctx.webServer.register({ kind: 'exact', path: IMAGE_UPLOAD_PATH, handler: uploadHandler }),
     'note-wall: image upload route',
+  )
+
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'exact', path: BACKUP_PATH, handler: backupHandler }),
+    'note-wall: backup route',
   )
 
   // The webServer match appends '/' to a prefix (`pathname === prefix ||

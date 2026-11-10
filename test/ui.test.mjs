@@ -565,3 +565,540 @@ test('enabling folders adds the folder filter, manager and selection controls', 
     'selection mode toggle should appear',
   )
 })
+
+// --- v1.2.0-C: complete backup ZIP, settings.section, first-use guide,
+// --- and interval-level reminder gating -------------------------------------
+
+function zh(text) {
+  return text
+}
+
+function memoryStorage() {
+  const memory = new Map()
+  return {
+    getItem(key) { return memory.has(key) ? memory.get(key) : null },
+    setItem(key, value) { memory.set(key, String(value)) },
+  }
+}
+
+function byId(nodes, id) {
+  return nodes.find(function (node) { return node.props && node.props.id === id })
+}
+
+test('the client registers the settings.section page plus the existing surfaces', () => {
+  const registrations = []
+  const ctx = {
+    locale: {
+      getSnapshot() { return { active: 'zh' } },
+      subscribe() { return function () {} },
+    },
+    slots: {
+      inject(name, register) {
+        register()
+      },
+      register(options, component) {
+        registrations.push({ options, component })
+        return function () {}
+      },
+    },
+  }
+  client.module.apply(ctx)
+
+  function named(name) {
+    return registrations.filter(function (entry) { return entry.options.name === name })
+  }
+  assert.equal(named('sidebar.panellist').length, 1)
+  assert.equal(named('main').length, 1)
+  assert.equal(named('shell.overlay').length, 1)
+
+  const section = named('settings.section')
+  assert.equal(section.length, 1, 'the note wall must register a settings page')
+  assert.equal(section[0].options.id, 'note-wall')
+  assert.equal(typeof section[0].options.label, 'function')
+  assert.equal(section[0].options.label(), '便签墙', 'the label follows the active locale')
+  assert.equal(typeof section[0].component, 'function')
+
+  const rendered = section[0].component({ close: function () {} })
+  assert.equal(rendered.type, hook.SettingsSection, 'the section renders the shared settings page')
+
+  const icon = named('settings.section.icon')
+  assert.equal(icon.length, 1)
+  assert.equal(icon[0].options.id, 'note-wall', 'the icon id matches the section id')
+  const iconElement = icon[0].component({ size: 16, active: false })
+  assert.equal(typeof iconElement.type, 'function', 'the icon returns a glyph component element')
+  const iconTree = iconElement.type(iconElement.props)
+  assert.equal(iconTree.type, 'svg')
+  assert.equal(iconTree.props.width, 16, 'the navigation row size is honoured')
+})
+
+test('the shared settings form edits the same controls as the settings panel', () => {
+  const settings = cloneDefaultSettings()
+  const draft = cloneDefaultSettings()
+  draft.folders.enabled = true
+  draft.reminders.notifications = true
+  const saves = []
+  const tree = hook.SettingsForm({
+    settings: settings,
+    draft: draft,
+    t: zh,
+    busy: false,
+    onSave(patch) { saves.push(plain(patch)) },
+    onReset() {},
+  })
+  const nodes = collect(tree)
+  const text = nodes.map(textContent).join('\n')
+  for (const label of ['分类历史', '文件夹', '提醒', '主界面 / 全局提醒', 'AI 写入', '动效']) {
+    assert.ok(text.indexOf(label) >= 0, 'missing settings section: ' + label)
+  }
+  const rows = nodes.filter(function (node) {
+    return node.type === 'label' && node.props.className === 'nw-set-row'
+  })
+  assert.ok(rows.length >= 6, 'every opt-in feature exposes a checkbox row')
+  const save = nodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '保存设置'
+  })
+  assert.ok(save, 'save button missing')
+  save.props.onClick({ preventDefault() {} })
+  assert.deepEqual(saves, [{ folders: { enabled: true }, reminders: { notifications: true } }])
+})
+
+test('the settings page renders the shared form without the dialog chrome', () => {
+  const sectionNode = hook.SettingsSection({
+    initialSettings: hook.normalizeClientSettings({ folders: { enabled: true } }),
+  })
+  const nodes = collect(sectionNode)
+  const page = nodes.find(function (node) {
+    return node.props && node.props.className === 'nw-settings-page'
+  })
+  assert.ok(page, 'settings page root missing')
+  assert.ok(nodes.some(function (node) { return node.type === hook.Styles }), 'the page carries its scoped stylesheet')
+  assert.equal(nodes.filter(function (node) { return node.props && node.props.role === 'dialog' }).length, 0)
+  const form = nodes.find(function (node) { return node.type === hook.SettingsForm })
+  assert.ok(form, 'the settings page must render the shared SettingsForm')
+  assert.equal(typeof form.props.onSave, 'function')
+  assert.equal(typeof form.props.onReset, 'function')
+  assert.equal(form.props.settings.folders.enabled, true, 'the page starts from the Host settings it was given')
+  // The same component renders the dialog body, so the controls cannot drift.
+  const dialogNodes = collect(hook.SettingsPanel({
+    settings: cloneDefaultSettings(),
+    t: zh,
+    onSave() {},
+    onReset() {},
+    onClose() {},
+  }))
+  assert.ok(dialogNodes.some(function (node) { return node.type === hook.SettingsForm }))
+})
+
+test('the first-use guide explains the opt-in defaults and is remembered once dismissed', () => {
+  const storage = memoryStorage()
+  assert.equal(hook.ONBOARDING_KEY, 'dsh-note-wall:onboarding-v1')
+  assert.equal(hook.onboardingSeen(storage), false, 'a fresh browser has not seen the guide')
+  assert.equal(hook.onboardingSeen(null), true, 'a shell that cannot remember never nags')
+  assert.equal(hook.markOnboardingSeen(storage), true)
+  assert.equal(hook.onboardingSeen(storage), true, 'the guide never shows again once seen')
+
+  const calls = []
+  const nodes = collect(hook.OnboardingGuide({
+    t: zh,
+    onKeepOff() { calls.push('keep-off') },
+    onOpenSettings() { calls.push('open-settings') },
+  }))
+  const dialog = byId(nodes, 'nw-onboarding-dialog')
+  assert.ok(dialog, 'guide dialog missing')
+  assert.equal(dialog.props.role, 'dialog')
+  assert.equal(dialog.props['aria-modal'], 'true')
+  assert.equal(typeof dialog.props['aria-labelledby'], 'string')
+  const text = nodes.map(textContent).join('')
+  assert.match(text, /默认关闭/)
+  assert.match(text, /提醒/)
+  assert.match(text, /全局提醒/)
+  const keepOff = nodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '保持关闭'
+  })
+  const openSettings = nodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '去设置'
+  })
+  assert.ok(keepOff, '「保持关闭」button missing')
+  assert.ok(openSettings, '「去设置」button missing')
+  keepOff.props.onClick()
+  openSettings.props.onClick()
+  assert.deepEqual(calls, ['keep-off', 'open-settings'])
+})
+
+test('the note wall shows the first-use guide only on a first visit', () => {
+  const firstVisit = collect(hook.NoteWallPage({ ctx: undefined, initialOnboardingSeen: false }))
+  const guide = firstVisit.find(function (node) { return node.type === hook.OnboardingGuide })
+  assert.ok(guide, 'a first visit must show the guide')
+  assert.equal(typeof guide.props.onKeepOff, 'function')
+  assert.equal(typeof guide.props.onOpenSettings, 'function')
+  assert.ok(guide.props.primaryRef, 'the guide exposes a focus target for its primary action')
+
+  const returned = collect(hook.NoteWallPage({ ctx: undefined, initialOnboardingSeen: true }))
+  assert.equal(returned.some(function (node) { return node.type === hook.OnboardingGuide }), false, 'the guide is not shown again')
+})
+
+test('the toolbar offers the complete ZIP backup instead of the JSON export', () => {
+  const nodes = collect(hook.NoteWallPage({ ctx: undefined }))
+  const exportButton = nodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '完整备份 ZIP'
+  })
+  assert.ok(exportButton, 'complete backup ZIP export missing')
+  assert.match(exportButton.props.title, /图片/)
+  assert.match(exportButton.props.title, /设置/)
+  const importButton = nodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '导入完整备份'
+  })
+  assert.ok(importButton, 'complete backup ZIP import missing')
+  assert.equal(nodes.some(function (node) {
+    return node.type === 'a' && node.props.download === 'dsh-note-wall-notes.json'
+  }), false, 'the JSON-only export must be gone')
+  const picker = nodes.find(function (node) {
+    return node.props && node.props.type === 'file' && typeof node.props.accept === 'string' && node.props.accept.indexOf('.zip') >= 0
+  })
+  assert.ok(picker, 'the import picker must accept .zip files')
+  assert.equal(hook.isZipFile({ name: 'note-wall-backup-20261110-220000.zip', type: '' }), true)
+  assert.equal(hook.isZipFile({ name: 'notes.json', type: 'application/json' }), false)
+})
+
+test('backup helpers parse the archive name and build the import report', () => {
+  assert.equal(
+    hook.backupFilenameFromDisposition('attachment; filename="note-wall-backup-20260101-010101.zip"'),
+    'note-wall-backup-20260101-010101.zip',
+  )
+  assert.equal(
+    hook.backupFilenameFromDisposition("attachment; filename*=UTF-8''note-wall-backup-20260101-010101.zip"),
+    'note-wall-backup-20260101-010101.zip',
+  )
+  assert.equal(hook.backupFilenameFromDisposition('inline'), '')
+  assert.equal(hook.backupFilenameFromDisposition('attachment; filename="../../evil.zip"'), '', 'paths are never accepted')
+
+  assert.equal(hook.backupRequestUrl(), '/plugins/dsh-note-wall/backup?settings=1')
+  assert.equal(hook.backupRequestUrl({ includeSettings: false }), '/plugins/dsh-note-wall/backup?settings=0')
+  assert.equal(hook.backupImportUrl('replace', true), '/plugins/dsh-note-wall/backup?mode=replace&applySettings=1')
+  assert.equal(hook.backupImportUrl('weird', false), '/plugins/dsh-note-wall/backup?mode=merge&applySettings=0')
+
+  const report = hook.backupReportText(zh, {
+    mode: 'merge',
+    importedNotes: 3,
+    skippedNotes: 1,
+    importedFolders: 2,
+    imageCount: 4,
+    settingsIncluded: true,
+    settingsApplied: false,
+    safetyBackup: 'note-wall-backup-20260101-010101.zip',
+  })
+  assert.match(report, /合并导入完成/)
+  assert.match(report, /便签 3 条/)
+  assert.match(report, /跳过 1 条/)
+  assert.match(report, /文件夹 2 个/)
+  assert.match(report, /图片 4 张/)
+  assert.match(report, /设置保留当前值/)
+  assert.match(report, /安全备份/)
+})
+
+test('the complete backup export requests the ZIP, names it and revokes the blob URL', async () => {
+  const requests = []
+  const created = []
+  const revoked = []
+  const timers = []
+  const blob = { size: 12, type: 'application/zip' }
+  const document = {
+    createElement(tag) {
+      const element = { tag: tag, clicked: false, click() { this.clicked = true } }
+      created.push(element)
+      return element
+    },
+  }
+  const urlApi = {
+    createObjectURL(value) {
+      assert.equal(value, blob)
+      return 'blob:note-wall-backup'
+    },
+    revokeObjectURL(value) { revoked.push(value) },
+  }
+  const fetch = async function (target, init) {
+    requests.push({ target: target, init: init })
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return String(name).toLowerCase() === 'content-disposition'
+            ? 'attachment; filename="note-wall-backup-20261110-220000.zip"'
+            : null
+        },
+      },
+      async blob() { return blob },
+    }
+  }
+
+  const filename = await hook.downloadBackup({
+    fetch: fetch,
+    document: document,
+    url: urlApi,
+    setTimeout(fn) { timers.push(fn) },
+  })
+  assert.equal(filename, 'note-wall-backup-20261110-220000.zip')
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].target, '/plugins/dsh-note-wall/backup?settings=1')
+  assert.equal(requests[0].init.method, 'GET')
+  assert.equal(requests[0].init.headers['x-dsh-note-wall'], '1')
+  assert.equal(requests[0].init.credentials, 'same-origin')
+  assert.equal(created.length, 1, 'only a temporary anchor is created')
+  assert.equal(created[0].tag, 'a')
+  assert.equal(created[0].href, 'blob:note-wall-backup')
+  assert.equal(created[0].download, filename)
+  assert.equal(created[0].clicked, true)
+  assert.equal(revoked.length, 0, 'the object URL stays alive until the click settles')
+  timers.forEach(function (fn) { fn() })
+  assert.deepEqual(revoked, ['blob:note-wall-backup'])
+
+  await hook.downloadBackup({
+    fetch: fetch,
+    document: document,
+    url: urlApi,
+    setTimeout(fn) { timers.push(fn) },
+    includeSettings: false,
+  })
+  assert.match(requests[1].target, /settings=0$/)
+})
+
+test('the complete backup import posts the raw ZIP with the chosen mode', async () => {
+  const requests = []
+  const file = { name: 'note-wall-backup-20261110-220000.zip', type: 'application/zip' }
+  const report = {
+    mode: 'replace',
+    importedNotes: 2,
+    skippedNotes: 0,
+    importedFolders: 1,
+    imageCount: 2,
+    settingsIncluded: true,
+    settingsApplied: true,
+    safetyBackup: 'note-wall-backup-20261110-215900.zip',
+  }
+  const value = await hook.importBackup(file, 'replace', true, {
+    fetch: async function (target, init) {
+      requests.push({ target: target, init: init })
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { ok: true, value: report } },
+      }
+    },
+  })
+  assert.deepEqual(plain(value), report)
+  assert.equal(requests[0].target, '/plugins/dsh-note-wall/backup?mode=replace&applySettings=1')
+  assert.equal(requests[0].init.method, 'POST')
+  assert.equal(requests[0].init.body, file, 'the ZIP is sent as the raw body')
+  assert.equal(requests[0].init.headers['content-type'], 'application/zip')
+  assert.equal(requests[0].init.headers['x-dsh-note-wall'], '1')
+
+  let failure
+  try {
+    await hook.importBackup(file, 'merge', false, {
+      fetch: async function () {
+        return {
+          ok: false,
+          status: 413,
+          async json() {
+            return { ok: false, error: { code: 'backup-too-large', message: '请求体过大。' } }
+          },
+        }
+      },
+    })
+  } catch (error) {
+    failure = error
+  }
+  assert.ok(failure, 'a 413 must reject')
+  assert.equal(failure.code, 'backup-too-large')
+  assert.equal(failure.status, 413)
+  assert.match(hook.errorText(zh, failure), /太大/)
+})
+
+function trackedController(settings, extra) {
+  const seen = {
+    intervals: 0,
+    cleared: 0,
+    callbacks: [],
+    due: [],
+    notify: [],
+    sound: [],
+    notifications: 0,
+    audio: 0,
+    loads: 0,
+  }
+  const now = Date.parse('2026-11-10T12:00:00.000Z')
+  const controller = hook.createReminderController(Object.assign({
+    settings: settings,
+    now: function () { return now },
+    setInterval(fn) {
+      seen.intervals += 1
+      seen.callbacks.push(fn)
+      return seen.intervals
+    },
+    clearInterval() { seen.cleared += 1 },
+    loadSnapshot: async function () {
+      seen.loads += 1
+      return { notes: [], settings: settings }
+    },
+    permission: function () { return 'granted' },
+    notification: function () { seen.notifications += 1 },
+    audio: function () { seen.audio += 1 },
+    notify: function (note) { seen.notify.push(note.id) },
+    playSound: function (volume) { seen.sound.push(volume) },
+    onDueChange: function (notes) { seen.due = notes.map(function (note) { return note.id }) },
+  }, extra || {}))
+  return { controller: controller, seen: seen }
+}
+
+test('disabled reminders create no interval, notification, audio or overlay update', async () => {
+  const cases = [
+    cloneDefaultSettings(),
+    hook.normalizeClientSettings({
+      reminders: { enabled: true, sound: true, notifications: true },
+      globalAlarm: { enabled: true, mode: 'silent' },
+    }),
+    hook.normalizeClientSettings({
+      reminders: { enabled: true, sound: true, notifications: true },
+      globalAlarm: { enabled: false, mode: 'overlay' },
+    }),
+    hook.normalizeClientSettings({
+      reminders: { enabled: false, sound: true, notifications: true },
+      globalAlarm: { enabled: true, mode: 'overlay' },
+    }),
+  ]
+  for (const settings of cases) {
+    const tracked = trackedController(settings)
+    assert.equal(tracked.controller.getPlan().active, false)
+    assert.equal(tracked.controller.start(), false, 'an inactive plan must not start')
+    await tracked.controller.tickOnce(true)
+    tracked.controller.stop()
+    tracked.controller.dispose()
+    assert.equal(tracked.seen.intervals, 0, 'no interval may be created')
+    assert.equal(tracked.seen.cleared, 0)
+    assert.equal(tracked.seen.loads, 0, 'no polling may happen')
+    assert.equal(tracked.seen.notify.length, 0, 'no notification may be shown')
+    assert.equal(tracked.seen.sound.length, 0, 'no audio may be played')
+    assert.equal(tracked.seen.notifications, 0, 'no Notification may be constructed')
+    assert.equal(tracked.seen.audio, 0, 'no AudioContext may be constructed')
+    assert.equal(tracked.seen.due.length, 0, 'the overlay flag may never be set')
+  }
+})
+
+test('enabled reminders start exactly one interval and stop on disable and dispose', async () => {
+  const enabled = hook.normalizeClientSettings({
+    reminders: { enabled: true, sound: true, notifications: true, overdue: true },
+    globalAlarm: { enabled: true, mode: 'overlay' },
+  })
+  const tracked = trackedController(enabled)
+  assert.equal(tracked.controller.start(), true)
+  await tracked.controller.tickOnce(true)
+  assert.equal(tracked.seen.intervals, 1, 'exactly one interval')
+  assert.equal(tracked.controller.isRunning(), true)
+  assert.equal(tracked.controller.start(), true, 'starting again is a no-op')
+  assert.equal(tracked.seen.intervals, 1, 'never a second interval')
+
+  tracked.controller.setSettings(cloneDefaultSettings())
+  assert.equal(tracked.controller.isRunning(), false, 'disabling reminders stops the timer')
+  assert.equal(tracked.seen.cleared, 1)
+  assert.equal(tracked.controller.start(), false, 'a disabled plan does not start')
+  assert.equal(tracked.seen.intervals, 1)
+
+  tracked.controller.setSettings(enabled)
+  assert.equal(tracked.controller.start(), true)
+  assert.equal(tracked.seen.intervals, 2)
+  tracked.controller.dispose()
+  assert.equal(tracked.controller.isRunning(), false, 'unmount/dispose stops the timer')
+  assert.equal(tracked.seen.cleared, 2)
+  tracked.controller.dispose()
+  assert.equal(tracked.seen.cleared, 2, 'dispose is idempotent')
+})
+
+test('reminders honour catch-up, permission and sound gates', async () => {
+  const note = {
+    id: 'n1',
+    text: '旧提醒',
+    remindAt: '2026-11-10T11:00:00.000Z',
+    folderId: '',
+    image: '',
+  }
+  function run(settings, extra) {
+    const seen = { due: [], notify: [], sound: [], notifications: 0, audio: 0 }
+    const now = Date.parse('2026-11-10T12:00:00.000Z')
+    const controller = hook.createReminderController(Object.assign({
+      settings: settings,
+      now: function () { return now },
+      setInterval: function () { return 1 },
+      clearInterval: function () {},
+      loadSnapshot: async function () { return { notes: [note], settings: settings } },
+      permission: function () { return 'granted' },
+      notification: function () { seen.notifications += 1 },
+      audio: function () { seen.audio += 1 },
+      notify: function (dueNote) { seen.notify.push(dueNote.id) },
+      playSound: function (volume) { seen.sound.push(volume) },
+      onDueChange: function (notes) {
+        seen.due = notes.map(function (item) { return item.id })
+      },
+    }, extra || {}))
+    return { controller: controller, seen: seen }
+  }
+  const catchUpOff = hook.normalizeClientSettings({
+    reminders: { enabled: true, notifications: true, sound: true, volume: 0.35, overdue: false },
+    globalAlarm: { enabled: true, mode: 'overlay' },
+  })
+  const catchUpOn = hook.normalizeClientSettings({
+    reminders: { enabled: true, notifications: true, sound: true, volume: 0.35, overdue: true },
+    globalAlarm: { enabled: true, mode: 'overlay' },
+  })
+
+  const noCatchUp = run(catchUpOff)
+  await noCatchUp.controller.tickOnce(true)
+  assert.deepEqual(noCatchUp.seen.due, [], 'an already-overdue reminder is not shown on the first tick')
+  assert.deepEqual(noCatchUp.seen.notify, [])
+  assert.deepEqual(noCatchUp.seen.sound, [])
+
+  const catchUp = run(catchUpOn)
+  await catchUp.controller.tickOnce(true)
+  assert.deepEqual(catchUp.seen.due, ['n1'])
+  assert.deepEqual(catchUp.seen.notify, ['n1'])
+  assert.deepEqual(catchUp.seen.sound, [0.35], 'the configured volume reaches the audio gate')
+  await catchUp.controller.tickOnce(false)
+  assert.deepEqual(catchUp.seen.notify, ['n1'], 'the same reminder is never notified twice')
+
+  const muted = hook.normalizeClientSettings({
+    reminders: { enabled: true, notifications: true, sound: false, volume: 0.9, overdue: true },
+    globalAlarm: { enabled: true, mode: 'overlay' },
+  })
+  const quiet = run(muted, { notify: undefined, playSound: undefined })
+  await quiet.controller.tickOnce(true)
+  assert.equal(quiet.seen.notifications, 1, 'notifications still work with sound off')
+  assert.equal(quiet.seen.audio, 0, 'no AudioContext when the sound is off')
+
+  const deniedSettings = hook.normalizeClientSettings({
+    reminders: { enabled: true, notifications: true, sound: false, overdue: true },
+    globalAlarm: { enabled: true, mode: 'overlay' },
+  })
+  const denied = run(deniedSettings, { permission: function () { return 'denied' }, notify: undefined, playSound: undefined })
+  await denied.controller.tickOnce(true)
+  assert.deepEqual(denied.seen.due, ['n1'], 'the card still appears without permission')
+  assert.equal(denied.seen.notifications, 0, 'no Notification without permission')
+  assert.equal(denied.seen.audio, 0)
+})
+
+test('the shell overlay renders nothing while the alarm is disabled or nothing is due', () => {
+  const enabled = hook.normalizeClientSettings({
+    reminders: { enabled: true },
+    globalAlarm: { enabled: true, mode: 'overlay' },
+  })
+  assert.equal(hook.reminderPlan(cloneDefaultSettings()).active, false)
+  assert.equal(hook.reminderPlan(enabled).active, true)
+
+  hook.publishSettings(cloneDefaultSettings())
+  assert.equal(hook.ReminderOverlay({ ctx: undefined }), null, 'disabled: no overlay node at all')
+
+  hook.publishSettings(enabled)
+  assert.equal(hook.ReminderOverlay({ ctx: undefined }), null, 'active but nothing due: no overlay node')
+
+  hook.publishSettings(cloneDefaultSettings())
+  assert.equal(hook.ReminderOverlay({ ctx: undefined }), null)
+})

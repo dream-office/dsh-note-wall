@@ -15,6 +15,7 @@ node test/signature.test.mjs
 node test/tool.test.mjs
 node test/settings.test.mjs
 node test/ui.test.mjs
+node test/backup.test.mjs
 ```
 
 不需要安装依赖；测试用 Node 内置模块。

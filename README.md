@@ -1,9 +1,9 @@
 # dsh-note-wall · 便签墙
 
-在 DeepSeek Harness 左栏加一个**便签墙**入口：随手把灵感贴到墙上，用颜色和分类整理，并可以给便签加**链接**和**图片**。
+在 DeepSeek Harness 左栏加一个**便签墙**入口：随手把灵感贴到墙上，用颜色、分类和文件夹整理，并可以加**链接**、**图片**、**提醒**，做完整 ZIP 备份。
 便签只保存在本机：页面不访问外部网络，文字和图片只在本机回环 HTTP 与文件系统之间传递，也不会写进任何会话日志。
 
-> 版本：**1.1.1** · MIT · Node >= 22.13
+> 版本：**1.2.0** · MIT · Node >= 22.13
 
 ## 使用
 
@@ -19,6 +19,10 @@
    如果这条便签在这期间被别处改过，保存时会提示并自动同步最新版本；再点一次「保存」会用你现在的内容覆盖它。
 5. 编辑时在文本框里按 `Esc` 取消编辑；删除确认时按 `Esc` 取消删除。
 6. 点便签上的图片可查看原图，点链接会在新标签页打开。
+7. 工具栏支持**搜索**（正文/标签/链接）和**颜色/分类/文件夹筛选**，可以叠加；点「设置」可开关分类历史、文件夹、提醒、全局提醒、AI 写入，并选择图片模式（缩略图/小图标/大图）。
+8. 启用提醒后，可在输入卡或编辑卡里选日期时间；到点会提醒，关闭 Harness 期间错过的会在重开后补提醒。提醒/通知/全局弹窗默认关闭，需在设置里主动开启。
+9. 启用文件夹后可新建/重命名/删除文件夹（删夹不删便签），也可进入选择模式批量移入。
+10. 工具栏「完整备份 ZIP」导出 `notes.json` + `images/` + `manifest.json` + 可选 `settings.json`；导入可选替换或合并，替换前会自动备份当前墙。
 
 ## 数据
 
@@ -26,9 +30,12 @@
 |---|---|
 | 存储位置 | `$DSH_HOME/note-wall/store.json`（未设置 `DSH_HOME` 时为 `~/.dsh/note-wall/store.json`） |
 | 图片位置 | `$DSH_HOME/note-wall/images/<uuid>.<扩展名>` |
+| 设置位置 | `$DSH_HOME/note-wall/settings.json`（默认开启缩略图；分类历史/文件夹/提醒/全局提醒/AI 写入默认关） |
+| 备份位置 | `$DSH_HOME/note-wall/backups/note-wall-auto-<时间>.zip`（替换导入前自动生成） |
 | 共享范围 | 同一个 `$DSH_HOME` 下的所有 profile 共用一面墙 |
-| 格式 | `{ "version": 1, "notes": [...] }`，写入时先写唯一临时文件再原子替换；图片单独按文件保存 |
+| 格式 | `{ "version": 2, "folders": [...], "notes": [...] }`，写入时先写唯一临时文件再原子替换；图片单独按文件保存 |
 | 条数上限 | 500 条 |
+| 文件夹上限 | 100 个，名称 40 字符 |
 | 单条字数 | 500 字符 |
 | 分类长度 | 24 字符 |
 | 链接长度 | 2048 字符，仅 `http` / `https` |
@@ -46,11 +53,15 @@
 
 - `POST /plugins/dsh-note-wall/api`：便签操作（JSON，带 `x-dsh-note-wall: 1`）。
 - `POST /plugins/dsh-note-wall/image`：图片上传（原始字节，带 `x-dsh-note-wall: 1`）。
+- `GET /plugins/dsh-note-wall/backup`：完整备份 ZIP（notes.json + images + manifest + 可选 settings.json，带 `x-dsh-note-wall: 1`）。
+- `POST /plugins/dsh-note-wall/backup`：导入 ZIP（原始字节，`mode=replace|merge`，可选 `applySettings=0|1`，带 `x-dsh-note-wall: 1`）。
 - `GET /plugins/dsh-note-wall/image/<id>`：读取图片。`<img>` 请求无法附加自定义请求头，所以这条路由不做插件头校验；
   图片 id 是随机 UUID、没有列表路由，处理器只读取插件自己的 `images` 目录，路径不匹配一律 404。
 
 上传按文件头校验真实格式（不只看扩展名或 Content-Type），大小、数量、字符数都由 Host 校验；便签里只能引用
 `<uuid>.<png|jpg|webp|gif>` 形式的 id，且该图片文件必须真实存在，不能把服务指向任意路径。
+ZIP 导入校验路径穿越、绝对路径、未知文件、重复条目、加密/不支持的压缩、CRC、总解压大小与图片数；
+替换导入会先在 `backups/` 自动备份当前墙，校验失败不会改动现有数据。
 便签存储不可用（例如损坏且无法保留）时，上传也会被拒绝（503），不会留下无法关联的图片文件。
 
 ## 安装与卸载
@@ -80,13 +91,16 @@ git clone https://github.com/dream-office/dsh-note-wall.git
 node --check index.js
 node --check client.js
 node --check lib/store.js
+node --check lib/settings.js
 node --check lib/images.js
+node --check lib/backup.js
 node test/store.test.mjs
 node test/route.test.mjs
 node test/signature.test.mjs
 node test/tool.test.mjs
 node test/settings.test.mjs
 node test/ui.test.mjs
+node test/backup.test.mjs
 ```
 
 或：
@@ -96,11 +110,12 @@ npm run check
 npm test
 ```
 
-- Host 半（`index.js`）只负责同源鉴权、请求解析和错误映射；存储与清理逻辑在 `lib/store.js`，图片格式识别在 `lib/images.js`。
+- Host 半（`index.js`）只负责同源鉴权、请求解析和错误映射；存储与清理逻辑在 `lib/store.js`，图片格式识别在 `lib/images.js`，设置持久化在 `lib/settings.js`，ZIP 备份在 `lib/backup.js`。
 - Web 半（`client.js`）是手写的 module-loader 模块：只 `require('react')`，不 import 任何 Harness Client 包，
   不写 `document.body/head`，界面颜色来自 `--dsw-alias-*` 主题 token，便签底色是插件自己的配色。
   暗色主题下会降低便签混色强度，并让文字/输入控件用主题前景色的高不透明度混色，保证对比度。
-- 两半通过上面三条路由通信，图片在提交便签时先上传、拿到 id 后随便签保存；添加失败会尝试回收已上传的图片。
+- 两半通过上面几条路由通信，图片在提交便签时先上传、拿到 id 后随便签保存；添加失败会尝试回收已上传的图片。
+- 提醒/全局提醒是客户端功能：关闭时不会启动 interval、Notification、AudioContext 或 overlay 节点。
 
 ## 兼容性与已知限制
 
@@ -110,10 +125,12 @@ npm test
 - 便签必须有文字；链接和图片是附件，暂不支持纯图片便签。
 - 单机单用户，无多用户 ACL；图片读取路由不带插件头，依赖不可猜的随机 UUID；数据明文存盘。
 - 同一 `$DSH_HOME` 建议只由一个 Harness 进程使用（无跨进程文件锁）；同一 home 下所有 profile 共用一面墙。
-- 上限：500 条 / 单条 500 字 / 分类 24 字 / 链接 2048 字 / 图片 3MB（PNG、JPEG、WebP、GIF）。
-- 暂无搜索、筛选、导出、分页；超过 500 条需先删。
-- 自动化测试覆盖 Host + store + 设置 + 落款/搜索/导入导出/卡片渲染（87 条）；client 浏览器交互仍无自动化测试，CI 不做浏览器/视觉验收。
-- 「动效」和「上次颜色」是浏览器本地偏好（`dsh-note-wall:prefs-v1`），不跨浏览器/profile 同步。
+- 上限：500 条 / 100 个文件夹 / 单条 500 字 / 分类 24 字 / 链接 2048 字 / 图片 3MB（PNG、JPEG、WebP、GIF）。
+- 搜索、颜色/分类/文件夹筛选、提醒、完整 ZIP 备份已支持；无分页，超过 500 条需先删。
+- 新功能默认关：分类历史、文件夹、提醒、全局提醒、AI 写入；图片默认缩略图。可在便签墙「设置」或 DSH 设置页打开。
+- AI 写入不是默认能力：`note_wall_add` 需要先在设置里打开；关闭时 Host 侧直接拒绝。
+- 自动化测试覆盖 Host + store + 设置 + ZIP + 落款/搜索/导入导出/卡片渲染（118 条）；client 浏览器交互仍无自动化测试，CI 不做浏览器/视觉验收。
+- 浏览器通知权限、提示音自动播放、`shell.overlay` 层级需要真人手验；关闭提醒后不会启动定时器/声音/弹窗。
 - 正常添加失败会回收已上传图片；若进程在「上传成功、add 请求未发出」之间崩溃，可能留下未被引用的图片文件（无自动 GC）。
 - 自定义色为保证文字对比度，采用近中性底色 + 同色边框，不是整块浓色。
 - 开发/测试 Node ≥ 22（engines 已写）。

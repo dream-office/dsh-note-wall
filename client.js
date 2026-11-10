@@ -15,6 +15,7 @@ window.__ModuleLoader__.load({
     // while the pastel note fills are the plugin's own artwork.
 
     const API_PATH = '/plugins/dsh-note-wall/api'
+    const BACKUP_PATH = '/plugins/dsh-note-wall/backup'
     const IMAGE_UPLOAD_PATH = '/plugins/dsh-note-wall/image'
     const IMAGE_PATH_PREFIX = '/plugins/dsh-note-wall/image/'
     const API_HEADERS = { 'content-type': 'application/json', 'x-dsh-note-wall': '1' }
@@ -51,6 +52,13 @@ window.__ModuleLoader__.load({
     const SETTINGS_PANEL_ID = 'nw-settings-panel'
     const REMINDER_OVERLAY_ID = 'note-wall-reminders'
     const REMINDER_INTERVAL_MS = 30000
+    const ONBOARDING_KEY = 'dsh-note-wall:onboarding-v1'
+    const ONBOARDING_DIALOG_ID = 'nw-onboarding-dialog'
+    const IMPORT_DIALOG_ID = 'nw-import-dialog'
+    const IMPORT_DIALOG_TITLE_ID = 'nw-import-dialog-title'
+    const ONBOARDING_TITLE_ID = 'nw-onboarding-title'
+    const ONBOARDING_TEXT_ID = 'nw-onboarding-text'
+    const BACKUP_ZIP_NAME = /^[^/\\]+\.zip$/i
 
     // A-version signature (see DESIGN-SIGNATURE.md): footer mark + console line
     // + a three-tap author note. No storage, no network, no data collection.
@@ -309,21 +317,49 @@ window.__ModuleLoader__.load({
       return Number.isFinite(dueMs) && dueMs <= now
     }
 
+    /**
+     * Pure gate for the reminder surfaces. `active: false` means the whole
+     * feature is off: the overlay must not render, and the controller must not
+     * create a timer, a Notification, an AudioContext or a DOM node. Every
+     * consumer reads this one plan so the gates cannot drift apart.
+     */
+    function reminderPlan(settings) {
+      const off = {
+        active: false,
+        mode: 'silent',
+        notify: false,
+        sound: false,
+        volume: DEFAULT_CLIENT_SETTINGS.reminders.volume,
+        catchUp: false,
+      }
+      if (settings === null || typeof settings !== 'object') return off
+      if (!featureEnabled(settings, 'reminders')) return off
+      if (!featureEnabled(settings, 'globalAlarm')) return off
+      const alarm = settings.globalAlarm !== null && typeof settings.globalAlarm === 'object' ? settings.globalAlarm : {}
+      const mode = readEnumSetting(alarm.mode, GLOBAL_ALARM_MODES, 'overlay')
+      if (mode === 'silent') return off
+      const reminders = settings.reminders !== null && typeof settings.reminders === 'object' ? settings.reminders : {}
+      return {
+        active: true,
+        mode: mode,
+        notify: reminders.notifications === true,
+        sound: reminders.sound === true,
+        volume: readNumberSetting(reminders.volume, 0, 1, DEFAULT_CLIENT_SETTINGS.reminders.volume),
+        catchUp: reminders.overdue === true,
+      }
+    }
+
     /** Global reminder UI is armed only when both features say so and mode !== silent. */
     function globalAlarmActive(settings) {
-      if (!featureEnabled(settings, 'reminders')) return false
-      if (!featureEnabled(settings, 'globalAlarm')) return false
-      return readEnumSetting(settings.globalAlarm.mode, GLOBAL_ALARM_MODES, 'overlay') !== 'silent'
+      return reminderPlan(settings).active
     }
 
     function shouldNotifyReminder(settings) {
-      if (!globalAlarmActive(settings)) return false
-      return settings.reminders.notifications === true
+      return reminderPlan(settings).notify
     }
 
     function shouldPlayReminderSound(settings) {
-      if (!globalAlarmActive(settings)) return false
-      return settings.reminders.sound === true
+      return reminderPlan(settings).sound
     }
 
     function categoryHistorySize(limit) {
@@ -426,28 +462,35 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function showReminderNotification(note, t) {
+    function showReminderNotification(note, t, notificationCtor, permission) {
       try {
-        if (notificationPermissionState() !== 'granted') return
+        const state = typeof permission === 'string' ? permission : notificationPermissionState()
+        if (state !== 'granted') return false
+        const Ctor = typeof notificationCtor === 'function'
+          ? notificationCtor
+          : (typeof Notification !== 'undefined' ? Notification : undefined)
+        if (typeof Ctor !== 'function') return false
         const body = note && typeof note.text === 'string' ? note.text.slice(0, 160) : ''
-        const notification = new Notification(t('便签提醒', 'Note reminder'), {
+        const notification = new Ctor(t('便签提醒', 'Note reminder'), {
           body: body,
           tag: 'dsh-note-wall:' + String(note && note.id),
         })
         if (notification && typeof notification.close === 'function') {
           setTimeout(function () { try { notification.close() } catch (error) {} }, 12000)
         }
+        return true
       } catch (error) {
         // Some shells expose Notification but refuse construction.
+        return false
       }
     }
 
-    function playReminderSound(volume) {
+    function playReminderSound(volume, contextFactory) {
       try {
-        const Ctor = typeof window !== 'undefined'
-          ? window.AudioContext || window.webkitAudioContext
-          : undefined
-        if (typeof Ctor !== 'function') return
+        const Ctor = typeof contextFactory === 'function'
+          ? contextFactory
+          : (typeof window !== 'undefined' ? window.AudioContext || window.webkitAudioContext : undefined)
+        if (typeof Ctor !== 'function') return false
         const context = new Ctor()
         const level = typeof volume === 'number' && Number.isFinite(volume)
           ? Math.max(0, Math.min(1, volume))
@@ -468,8 +511,10 @@ window.__ModuleLoader__.load({
         setTimeout(function () {
           try { if (typeof context.close === 'function') context.close() } catch (error) {}
         }, 900)
+        return true
       } catch (error) {
         // Audio is optional; an autoplay refusal must never break the page.
+        return false
       }
     }
 
@@ -582,6 +627,400 @@ window.__ModuleLoader__.load({
       return { notes: notes, skipped: skipped }
     }
 
+    // ---------------------------------------------------------------------------
+    // Complete backup ZIP (client side): the Host builds/consumes the archive;
+    // the page only issues the request, names the download and shows a report.
+    // No ZIP library is involved, and nothing is appended to document.body/head.
+    // ---------------------------------------------------------------------------
+
+    function codedError(code, message) {
+      const error = new Error(message || code)
+      error.code = code
+      return error
+    }
+
+    /** Turn a failed backup response into a coded error the page can localize. */
+    async function readBackupFailure(response) {
+      let body = null
+      try {
+        if (response && typeof response.json === 'function') body = await response.json()
+      } catch (error) {
+        body = null
+      }
+      const info = body && body.error ? body.error : null
+      const failure = new Error(
+        info && info.message
+          ? String(info.message)
+          : info && info.code
+            ? String(info.code)
+            : 'HTTP ' + (response && response.status),
+      )
+      failure.code = info && typeof info.code === 'string' ? info.code : ''
+      failure.status = response && typeof response.status === 'number' ? response.status : 0
+      if (failure.code === '') {
+        // A response without a JSON failure body still maps to a coded message.
+        const byStatus = {
+          403: 'forbidden',
+          405: 'method-not-allowed',
+          413: 'backup-too-large',
+          415: 'unsupported-media-type',
+          503: 'store-unavailable',
+        }
+        if (byStatus[failure.status] !== undefined) failure.code = byStatus[failure.status]
+      }
+      return failure
+    }
+
+    function backupRequestUrl(options) {
+      const opts = options !== null && typeof options === 'object' ? options : {}
+      return BACKUP_PATH + '?settings=' + (opts.includeSettings === false ? '0' : '1')
+    }
+
+    function backupImportUrl(mode, applySettings) {
+      const normalized = mode === 'replace' ? 'replace' : 'merge'
+      return BACKUP_PATH + '?mode=' + normalized + '&applySettings=' + (applySettings === true ? '1' : '0')
+    }
+
+    /**
+     * Read the archive name out of `content-disposition`. Accepts the plain
+     * `filename="..."` form and the RFC 5987 `filename*=UTF-8''...` form, and
+     * only ever returns a plain `.zip` file name (never a path).
+     */
+    function backupFilenameFromDisposition(value) {
+      if (typeof value !== 'string') return ''
+      const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(value)
+      if (encoded !== null) {
+        try {
+          const decoded = decodeURIComponent(encoded[1].trim()).replace(/^"|"$/g, '')
+          if (BACKUP_ZIP_NAME.test(decoded)) return decoded
+        } catch (error) {
+          // Fall through to the plain form.
+        }
+      }
+      const plain = /filename\s*=\s*("?)([^";]+)\1/i.exec(value)
+      if (plain !== null) {
+        const name = plain[2].trim()
+        if (BACKUP_ZIP_NAME.test(name)) return name
+      }
+      return ''
+    }
+
+    /** Human report for a completed import, built from the Host's JSON value. */
+    function backupReportText(t, report) {
+      const value = report !== null && typeof report === 'object' ? report : {}
+      const count = function (input) {
+        const number = Number(input)
+        return Number.isFinite(number) && number > 0 ? Math.trunc(number) : 0
+      }
+      const mode = value.mode === 'replace' ? t('替换', 'Replace') : t('合并', 'Merge')
+      const parts = [
+        t(
+          mode + '导入完成：便签 ' + count(value.importedNotes) + ' 条，跳过 ' + count(value.skippedNotes) + ' 条',
+          mode + ' import finished: ' + count(value.importedNotes) + ' notes, ' + count(value.skippedNotes) + ' skipped',
+        ),
+        t('文件夹 ' + count(value.importedFolders) + ' 个', count(value.importedFolders) + ' folders'),
+        t('图片 ' + count(value.imageCount) + ' 张', count(value.imageCount) + ' images'),
+      ]
+      if (value.settingsIncluded === true) {
+        parts.push(value.settingsApplied === true
+          ? t('设置已应用', 'settings applied')
+          : t('设置保留当前值', 'current settings kept'))
+      }
+      if (typeof value.safetyBackup === 'string' && value.safetyBackup.length > 0) {
+        parts.push(t('安全备份：' + value.safetyBackup, 'Safety backup: ' + value.safetyBackup))
+      }
+      return parts.join(t('；', '; ')) + t('。', '.')
+    }
+
+    /**
+     * Download the complete backup. Kept injectable so the exact request URL,
+     * header, download name and object-URL cleanup are testable without a DOM.
+     */
+    async function downloadBackup(options) {
+      const env = options !== null && typeof options === 'object' ? options : {}
+      const fetchFn = typeof env.fetch === 'function' ? env.fetch : (typeof fetch === 'function' ? fetch : undefined)
+      if (typeof fetchFn !== 'function') throw codedError('backup-unavailable')
+      const doc = env.document !== undefined ? env.document : (typeof document !== 'undefined' ? document : null)
+      const urlApi = env.url !== undefined ? env.url : (typeof URL !== 'undefined' ? URL : null)
+      if (!doc || typeof doc.createElement !== 'function') throw codedError('backup-unavailable')
+      if (!urlApi || typeof urlApi.createObjectURL !== 'function') throw codedError('backup-unavailable')
+      const timer = typeof env.setTimeout === 'function' ? env.setTimeout : (typeof setTimeout === 'function' ? setTimeout : null)
+
+      const response = await fetchFn(backupRequestUrl(env), {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'x-dsh-note-wall': '1' },
+      })
+      if (!response || response.ok !== true) {
+        throw await readBackupFailure(response)
+      }
+      const blob = typeof response.blob === 'function' ? await response.blob() : null
+      if (!blob) throw codedError('bad-response')
+      const disposition = response.headers && typeof response.headers.get === 'function'
+        ? response.headers.get('content-disposition')
+        : ''
+      const filename = backupFilenameFromDisposition(disposition) || 'note-wall-backup.zip'
+      const objectUrl = urlApi.createObjectURL(blob)
+      const anchor = doc.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = filename
+      anchor.rel = 'noopener'
+      // A click without inserting the anchor in the document is enough and keeps
+      // document.body/head untouched.
+      anchor.click()
+      if (timer !== null) {
+        timer(function () {
+          try { urlApi.revokeObjectURL(objectUrl) } catch (error) {}
+        }, 1000)
+      } else {
+        try { urlApi.revokeObjectURL(objectUrl) } catch (error) {}
+      }
+      return filename
+    }
+
+    /** POST the chosen ZIP and return the Host's report value. */
+    async function importBackup(file, mode, applySettings, options) {
+      const env = options !== null && typeof options === 'object' ? options : {}
+      const fetchFn = typeof env.fetch === 'function' ? env.fetch : (typeof fetch === 'function' ? fetch : undefined)
+      if (typeof fetchFn !== 'function') throw codedError('backup-unavailable')
+      if (!file) throw codedError('backup-empty')
+      const response = await fetchFn(backupImportUrl(mode, applySettings), {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'content-type': 'application/zip', 'x-dsh-note-wall': '1' },
+        body: file,
+      })
+      if (!response || response.ok !== true) {
+        throw await readBackupFailure(response)
+      }
+      let body = null
+      try {
+        body = await response.json()
+      } catch (error) {
+        throw codedError('bad-response')
+      }
+      if (!body || body.ok !== true) {
+        const info = body && body.error ? body.error : null
+        const failure = codedError(info && typeof info.code === 'string' ? info.code : 'backup-import-failed')
+        failure.status = response.status
+        throw failure
+      }
+      return body.value !== null && typeof body.value === 'object' ? body.value : {}
+    }
+
+    /** Read a ZIP pick: only `.zip` file names are accepted, never a path. */
+    function isZipFile(file) {
+      if (!file || typeof file !== 'object') return false
+      const name = typeof file.name === 'string' ? file.name : ''
+      if (BACKUP_ZIP_NAME.test(name)) return true
+      return file.type === 'application/zip' || file.type === 'application/x-zip-compressed'
+    }
+
+    // ---------------------------------------------------------------------------
+    // First-use guide: shown once per browser, explains that every optional
+    // feature starts off and that reminders/notifications/the alarm need an
+    // explicit opt-in. It never writes settings.
+    // ---------------------------------------------------------------------------
+
+    function defaultLocalStorage() {
+      try {
+        return typeof localStorage !== 'undefined' ? localStorage : null
+      } catch (error) {
+        return null
+      }
+    }
+
+    function storageFor(storage) {
+      return storage !== undefined ? storage : defaultLocalStorage()
+    }
+
+    /** True when the guide must not appear; a shell without storage never nags. */
+    function onboardingSeen(storage) {
+      const store = storageFor(storage)
+      if (!store || typeof store.getItem !== 'function') return true
+      try {
+        return store.getItem(ONBOARDING_KEY) === '1'
+      } catch (error) {
+        return true
+      }
+    }
+
+    function markOnboardingSeen(storage) {
+      const store = storageFor(storage)
+      if (!store || typeof store.setItem !== 'function') return false
+      try {
+        store.setItem(ONBOARDING_KEY, '1')
+        return true
+      } catch (error) {
+        return false
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Reminder scheduler: one testable controller owns the interval and every
+    // side effect. Disabled reminders/global alarm, or `mode: 'silent'`, must
+    // create none of them: no interval, no Notification, no AudioContext, no
+    // overlay update. All collaborators are injectable for the tests.
+    // ---------------------------------------------------------------------------
+
+    async function loadReminderSnapshot() {
+      const results = await Promise.all([apiCall('state'), apiCall('settings')])
+      return {
+        notes: results[0] && Array.isArray(results[0].notes) ? results[0].notes : [],
+        settings: results[1] && results[1].settings,
+      }
+    }
+
+    function createReminderController(options) {
+      const env = options !== null && typeof options === 'object' ? options : {}
+      const setIntervalFn = typeof env.setInterval === 'function' ? env.setInterval : setInterval
+      const clearIntervalFn = typeof env.clearInterval === 'function' ? env.clearInterval : clearInterval
+      const now = typeof env.now === 'function' ? env.now : Date.now
+      const loadSnapshot = typeof env.loadSnapshot === 'function' ? env.loadSnapshot : loadReminderSnapshot
+      const permission = typeof env.permission === 'function'
+        ? env.permission
+        : function () { return notificationPermissionState() }
+      const onDueChange = typeof env.onDueChange === 'function' ? env.onDueChange : function () {}
+      const intervalMs = typeof env.intervalMs === 'number' && env.intervalMs > 0 ? env.intervalMs : REMINDER_INTERVAL_MS
+      let text = typeof env.t === 'function' ? env.t : function (zhText) { return zhText }
+      const notify = typeof env.notify === 'function'
+        ? env.notify
+        : function (note) { return showReminderNotification(note, text, env.notification, permission()) }
+      const playSound = typeof env.playSound === 'function'
+        ? env.playSound
+        : function (volume) { return playReminderSound(volume, env.audio) }
+
+      let settingsValue = normalizeClientSettings(env.settings)
+      let plan = reminderPlan(settingsValue)
+      let timer = null
+      // The catch-up window opens when the controller is created (or restarted),
+      // so the first tick never replays reminders that were already overdue
+      // before the overlay mounted, unless the user opted into catch-up.
+      let startedAt = now()
+      let disposed = false
+      const notified = {}
+      const dismissed = {}
+      let due = []
+
+      function isRunning() {
+        return timer !== null
+      }
+
+      function getPlan() {
+        return plan
+      }
+
+      function getDue() {
+        return due.slice()
+      }
+
+      function publish(next) {
+        due = next
+        onDueChange(next.slice(), { active: plan.active, mode: plan.mode })
+      }
+
+      function clearTimer() {
+        if (timer === null) return
+        clearIntervalFn(timer)
+        timer = null
+      }
+
+      function applySettings(nextSettings) {
+        settingsValue = normalizeClientSettings(nextSettings)
+        plan = reminderPlan(settingsValue)
+        if (!plan.active) {
+          clearTimer()
+          if (due.length > 0) publish([])
+        }
+        return settingsValue
+      }
+
+      async function tickOnce(first) {
+        if (disposed || !plan.active) return
+        let snapshot
+        try {
+          snapshot = await loadSnapshot()
+        } catch (error) {
+          return
+        }
+        if (disposed) return
+        if (snapshot && snapshot.settings !== undefined && snapshot.settings !== null) {
+          applySettings(snapshot.settings)
+        }
+        if (!plan.active) return
+        const notes = snapshot && Array.isArray(snapshot.notes) ? snapshot.notes : []
+        const current = now()
+        const dueNotes = notes.filter(function (note) {
+          if (!isReminderDue(note, current)) return false
+          if (dismissed[reminderKey(note)] === true) return false
+          if (first && plan.catchUp !== true) {
+            const dueMs = Date.parse(note.remindAt)
+            return Number.isFinite(dueMs) && dueMs > startedAt
+          }
+          return true
+        })
+        publish(dueNotes)
+        const fresh = dueNotes.filter(function (note) {
+          return notified[reminderKey(note)] !== true
+        })
+        if (fresh.length === 0) return
+        for (const note of fresh) notified[reminderKey(note)] = true
+        if (plan.sound) playSound(plan.volume)
+        if (plan.notify && permission() === 'granted') {
+          for (const note of fresh) notify(note)
+        }
+      }
+
+      function start(settings) {
+        if (disposed) return false
+        if (settings !== undefined) applySettings(settings)
+        if (!plan.active) {
+          clearTimer()
+          return false
+        }
+        if (timer !== null) return true
+        startedAt = now()
+        timer = setIntervalFn(function () { void tickOnce(false) }, intervalMs)
+        void tickOnce(true)
+        return true
+      }
+
+      function stop() {
+        clearTimer()
+        if (due.length > 0) publish([])
+      }
+
+      function forget(note) {
+        dismissed[reminderKey(note)] = true
+        publish(due.filter(function (item) { return item.id !== note.id }))
+      }
+
+      function dismissAll() {
+        for (const note of due) dismissed[reminderKey(note)] = true
+        publish([])
+      }
+
+      function dispose() {
+        disposed = true
+        clearTimer()
+      }
+
+      return {
+        start: start,
+        stop: stop,
+        dispose: dispose,
+        setSettings: applySettings,
+        tickOnce: tickOnce,
+        forget: forget,
+        dismissAll: dismissAll,
+        isRunning: isRunning,
+        getPlan: getPlan,
+        getDue: getDue,
+      }
+    }
+
     /**
      * Pure three-tap tracker for the footer signature. Keeps only the taps that
      * are still inside the window; the third tap inside it opens the note and
@@ -633,10 +1072,31 @@ window.__ModuleLoader__.load({
       window.__DSH_NOTE_WALL_TEST__.globalAlarmActive = globalAlarmActive
       window.__DSH_NOTE_WALL_TEST__.shouldNotifyReminder = shouldNotifyReminder
       window.__DSH_NOTE_WALL_TEST__.shouldPlayReminderSound = shouldPlayReminderSound
+      window.__DSH_NOTE_WALL_TEST__.reminderPlan = reminderPlan
+      window.__DSH_NOTE_WALL_TEST__.createReminderController = createReminderController
       window.__DSH_NOTE_WALL_TEST__.nextCategoryHistory = nextCategoryHistory
       window.__DSH_NOTE_WALL_TEST__.settingsPatch = settingsPatch
+      window.__DSH_NOTE_WALL_TEST__.backupRequestUrl = backupRequestUrl
+      window.__DSH_NOTE_WALL_TEST__.backupImportUrl = backupImportUrl
+      window.__DSH_NOTE_WALL_TEST__.backupFilenameFromDisposition = backupFilenameFromDisposition
+      window.__DSH_NOTE_WALL_TEST__.backupReportText = backupReportText
+      window.__DSH_NOTE_WALL_TEST__.downloadBackup = downloadBackup
+      window.__DSH_NOTE_WALL_TEST__.importBackup = importBackup
+      window.__DSH_NOTE_WALL_TEST__.isZipFile = isZipFile
+      window.__DSH_NOTE_WALL_TEST__.onboardingSeen = onboardingSeen
+      window.__DSH_NOTE_WALL_TEST__.markOnboardingSeen = markOnboardingSeen
+      window.__DSH_NOTE_WALL_TEST__.ONBOARDING_KEY = ONBOARDING_KEY
+      window.__DSH_NOTE_WALL_TEST__.publishSettings = publishSettings
+      window.__DSH_NOTE_WALL_TEST__.errorText = errorText
       window.__DSH_NOTE_WALL_TEST__.NoteCard = NoteCard
       window.__DSH_NOTE_WALL_TEST__.NoteWallPage = NoteWallPage
+      window.__DSH_NOTE_WALL_TEST__.Styles = Styles
+      window.__DSH_NOTE_WALL_TEST__.ReminderOverlay = ReminderOverlay
+      window.__DSH_NOTE_WALL_TEST__.SettingsForm = SettingsForm
+      window.__DSH_NOTE_WALL_TEST__.SettingsPanel = SettingsPanel
+      window.__DSH_NOTE_WALL_TEST__.SettingsSection = SettingsSection
+      window.__DSH_NOTE_WALL_TEST__.ImportDialog = ImportDialog
+      window.__DSH_NOTE_WALL_TEST__.OnboardingGuide = OnboardingGuide
     }
 
     // ---------------------------------------------------------------------------
@@ -880,6 +1340,19 @@ window.__ModuleLoader__.load({
         'image-write-failed': t('图片保存失败，请查看 Harness 日志。', 'Saving the image failed; check the Harness log.'),
         'import-json': t('JSON 格式不正确。', 'That JSON is not valid.'),
         'import-shape': t('JSON 里没有 notes 数组。', 'The JSON has no notes array.'),
+        'backup-unavailable': t('当前环境无法导出或导入备份。', 'This shell cannot export or import backups.'),
+        'backup-empty': t('先选择一个备份 ZIP 文件。', 'Choose a backup ZIP file first.'),
+        'backup-invalid-zip': t('这个文件不是有效的完整备份 ZIP。', 'That file is not a valid complete backup ZIP.'),
+        'backup-invalid-archive': t('备份结构无法识别。', 'The backup layout is not recognized.'),
+        'backup-unsafe-archive': t('备份包含不安全的路径，已拒绝导入。', 'The backup contains an unsafe path, so it was rejected.'),
+        'backup-too-large': t('备份文件太大，无法导入。', 'That backup is too large to import.'),
+        'backup-mode-invalid': t('备份导入方式无效。', 'That backup import mode is not valid.'),
+        'backup-import-failed': t('备份导入失败，便签墙没有改变。', 'The backup import failed; the wall was not changed.'),
+        'backup-export-failed': t('备份导出失败，请查看 Harness 日志。', 'The backup export failed; check the Harness log.'),
+        'backup-image-invalid': t('备份里的图片损坏或格式不支持。', 'An image in the backup is damaged or unsupported.'),
+        'backup-settings-invalid': t('备份里的设置无法识别，未应用。', 'The settings in the backup are not recognized, so they were not applied.'),
+        'backup-safety-failed': t('导入前的安全备份失败，替换已取消。', 'The safety backup failed, so the replace was cancelled.'),
+        'backup-settings-failed': t('备份里的设置没能写入，便签墙已回滚。', 'The backup settings could not be saved, so the wall was rolled back.'),
         'store-unavailable': t('便签存储暂时不可用，请查看 Harness 日志。', 'Note storage is unavailable; check the Harness log.'),
         'store-corrupt-unreadable': t('便签存储损坏且无法保留原文件，读写已停止。', 'Note storage is damaged and could not be preserved; reads and writes are stopped.'),
         'settings-unavailable': t('便签墙设置暂时不可用，请查看 Harness 日志。', 'Note wall settings are unavailable; check the Harness log.'),
@@ -896,6 +1369,7 @@ window.__ModuleLoader__.load({
         'unknown-action': t('未知操作。', 'Unknown action.'),
       }
       if (messages[code]) return messages[code]
+      if (error && error.status === 413) return t('备份文件太大，无法导入。', 'That backup is too large to import.')
       if (error && error.message) return String(error.message)
       return t('操作失败，请重试。', 'Something went wrong; try again.')
     }
@@ -1055,7 +1529,6 @@ window.__ModuleLoader__.load({
 .nw-filter{height:32px;padding:0 8px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;cursor:pointer}
 .nw-filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .nw-toolbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
-.nw-export{display:inline-flex;align-items:center;text-decoration:none}
 .nw-banner-success{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
 
 .nw-tone-amber{--nw-accent:#F0C24B}
@@ -1203,6 +1676,24 @@ window.__ModuleLoader__.load({
 .nw-cat-chip{height:24px;padding:0 9px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 60%,transparent);color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);font-family:inherit;font-size:11.5px;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nw-cat-chip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .nw-cat-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+
+/* v1.2.0-C: settings page (settings.section), first-use guide, ZIP dialogs */
+.nw-settings-page{display:flex;flex-direction:column;gap:12px;max-width:640px;padding:2px 2px 20px;box-sizing:border-box;color:var(--dsw-alias-label-primary);font-size:12.5px}
+.nw-settings-page-head{display:flex;flex-direction:column;gap:4px}
+.nw-settings-page-title{margin:0;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.nw-settings-page-sub{margin:0;font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
+.nw-settings-dialog-note{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent)}
+.nw-settings-dialog-text{margin:0;font-size:12.5px;line-height:1.7;color:var(--dsw-alias-label-primary)}
+.nw-onboarding-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:4px}
+.nw-onboarding-points{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
+.nw-radio-row{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-primary);cursor:pointer}
+.nw-radio-row input[type="radio"]{margin-top:3px;flex:none;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
+.nw-radio-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.nw-radio-hint{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}
+.nw-import-file{display:flex;align-items:center;gap:8px;min-width:0;padding:7px 9px;border-radius:10px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);font-size:11.5px;color:var(--dsw-alias-label-secondary)}
+.nw-import-file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.nw-import-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:2px}
+
 .nw-note-image{display:block;width:100%;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2)}
 .nw-note-image img{display:block;width:100%;max-height:190px;height:auto;object-fit:cover}
 .nw-note-image:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
@@ -1647,16 +2138,9 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * The note-wall settings surface. It deliberately stays inside the note
-     * wall page (not the Harness settings slot): this batch only persists Host
-     * settings and every control starts from the values the Host reported.
-     */
-    function SettingsPanel(props) {
-      const settings = props.settings
-      const t = props.t
+    /** Draft state shared by the settings dialog and the settings.section page. */
+    function useSettingsDraft(settings) {
       const [draft, setDraft] = React.useState(function () { return cloneSettingsDocument(settings) })
-      const busy = props.busy === true
 
       React.useEffect(function () {
         setDraft(cloneSettingsDocument(settings))
@@ -1676,6 +2160,28 @@ window.__ModuleLoader__.load({
           next[field] = value
           return next
         })
+      }
+
+      return { draft: draft, patchGroup: patchGroup, patchField: patchField }
+    }
+
+    /**
+     * The settings controls themselves, shared by the in-page dialog and the
+     * Harness settings section (`settings.section`) so both surfaces always
+     * show the same controls and the same patch semantics.
+     */
+    function SettingsForm(props) {
+      const settings = props.settings
+      const t = props.t
+      const draft = props.draft !== undefined && props.draft !== null ? props.draft : settings
+      const busy = props.busy === true
+
+      function patchGroup(group, field, value) {
+        if (typeof props.onPatchGroup === 'function') props.onPatchGroup(group, field, value)
+      }
+
+      function patchField(field, value) {
+        if (typeof props.onPatchField === 'function') props.onPatchField(field, value)
       }
 
       function submit(event) {
@@ -1712,42 +2218,9 @@ window.__ModuleLoader__.load({
         { value: 'silent', label: t('仅数据', 'Data only') },
       ]
 
-      return h('div', {
-        className: 'nw-settings-backdrop',
-        onMouseDown: function (event) {
-          if (event.target === event.currentTarget) props.onClose()
-        },
-      },
-        h('div', {
-          id: SETTINGS_PANEL_ID,
-          className: 'nw-settings',
-          role: 'dialog',
-          'aria-modal': 'true',
-          'aria-label': t('便签墙设置', 'Note wall settings'),
-        },
-          h('div', { className: 'nw-settings-head' },
-            h('h3', { className: 'nw-settings-title' }, t('便签墙设置', 'Note wall settings')),
-            h('button', {
-              type: 'button',
-              className: 'nw-iconbtn',
-              'aria-label': t('关闭设置', 'Close settings'),
-              title: t('关闭设置', 'Close settings'),
-              ref: props.closeButtonRef,
-              onClick: props.onClose,
-            }, h(CloseGlyph, { size: 14 })),
-          ),
-          props.error
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
-                h('span', { className: 'nw-banner-text' }, props.error),
-              )
-            : null,
-          props.notice
-            ? h('div', { className: 'nw-banner nw-banner-success', role: 'status' },
-                h('span', { className: 'nw-banner-text' }, props.notice),
-              )
-            : null,
-          h('div', { className: 'nw-settings-body' },
-            h('div', { className: 'nw-set-section' },
+      return h(React.Fragment, null,
+        h('div', { className: 'nw-settings-body' },
+          h('div', { className: 'nw-set-section' },
               h('div', { className: 'nw-set-section-title' }, t('分类历史', 'Category history')),
               row(t('显示最近使用的分类', 'Show recently used categories'), draft.categoryHistory.enabled,
                 function (value) { patchGroup('categoryHistory', 'enabled', value) }),
@@ -1858,12 +2331,14 @@ window.__ModuleLoader__.load({
               onClick: props.onReset,
             }, t('恢复默认', 'Restore defaults')),
             h('div', { className: 'nw-set-foot-actions' },
-              h('button', {
-                type: 'button',
-                className: 'nw-mini',
-                disabled: busy,
-                onClick: props.onClose,
-              }, t('取消', 'Cancel')),
+              props.onClose
+                ? h('button', {
+                    type: 'button',
+                    className: 'nw-mini',
+                    disabled: busy,
+                    onClick: props.onClose,
+                  }, t('取消', 'Cancel'))
+                : null,
               h('button', {
                 type: 'button',
                 className: 'nw-mini nw-mini-primary',
@@ -1871,6 +2346,366 @@ window.__ModuleLoader__.load({
                 onClick: submit,
               }, busy ? t('保存中…', 'Saving…') : t('保存设置', 'Save settings')),
             ),
+          ),
+      )
+    }
+
+    /** The in-page settings dialog: shell chrome around the shared form. */
+    function SettingsPanel(props) {
+      const t = props.t
+      const draft = useSettingsDraft(props.settings)
+      const busy = props.busy === true
+
+      return h('div', {
+        className: 'nw-settings-backdrop',
+        onMouseDown: function (event) {
+          if (event.target === event.currentTarget) props.onClose()
+        },
+      },
+        h('div', {
+          id: SETTINGS_PANEL_ID,
+          className: 'nw-settings',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': t('便签墙设置', 'Note wall settings'),
+        },
+          h('div', { className: 'nw-settings-head' },
+            h('h3', { className: 'nw-settings-title' }, t('便签墙设置', 'Note wall settings')),
+            h('button', {
+              type: 'button',
+              className: 'nw-iconbtn',
+              'aria-label': t('关闭设置', 'Close settings'),
+              title: t('关闭设置', 'Close settings'),
+              ref: props.closeButtonRef,
+              onClick: props.onClose,
+            }, h(CloseGlyph, { size: 14 })),
+          ),
+          props.error
+            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
+                h('span', { className: 'nw-banner-text' }, props.error),
+              )
+            : null,
+          props.notice
+            ? h('div', { className: 'nw-banner nw-banner-success', role: 'status' },
+                h('span', { className: 'nw-banner-text' }, props.notice),
+              )
+            : null,
+          h(SettingsForm, {
+            settings: props.settings,
+            draft: draft.draft,
+            t: t,
+            busy: busy,
+            onPatchGroup: draft.patchGroup,
+            onPatchField: draft.patchField,
+            onSave: props.onSave,
+            onReset: props.onReset,
+            onClose: props.onClose,
+          }),
+        ),
+      )
+    }
+
+    /**
+     * The Harness settings page (`settings.section`). It owns its own Host read
+     * and save so it works without the note wall page being open, and reuses
+     * the shared form so both surfaces show exactly the same controls.
+     */
+    function SettingsSection(props) {
+      const ctx = props.ctx
+      const t = useText(ctx)
+      const [settings, setSettings] = React.useState(function () {
+        return normalizeClientSettings(
+          props.initialSettings !== undefined ? props.initialSettings : settingsCache,
+        )
+      })
+      const [busy, setBusy] = React.useState(null)
+      const [error, setError] = React.useState('')
+      const [notice, setNotice] = React.useState('')
+      const [loadError, setLoadError] = React.useState('')
+      const draft = useSettingsDraft(settings)
+      const tRef = React.useRef(t)
+      const aliveRef = React.useRef(true)
+
+      React.useEffect(function () {
+        tRef.current = t
+      }, [t])
+
+      React.useEffect(function () {
+        aliveRef.current = true
+        return function () { aliveRef.current = false }
+      }, [])
+
+      React.useEffect(function () {
+        const controller = new AbortController()
+        apiCall('settings', null, controller.signal)
+          .then(function (value) {
+            if (!aliveRef.current) return
+            const next = normalizeClientSettings(value && value.settings)
+            setSettings(next)
+            setLoadError('')
+            publishSettings(next)
+          })
+          .catch(function (loadFailure) {
+            if (loadFailure && loadFailure.name === 'AbortError') return
+            if (!aliveRef.current) return
+            setSettings(normalizeClientSettings(null))
+            setLoadError(errorText(tRef.current, loadFailure, DEFAULT_LIMITS))
+          })
+        return function () { controller.abort() }
+      }, [])
+
+      async function save(patch) {
+        if (busy !== null) return
+        if (!patch || Object.keys(patch).length === 0) {
+          setNotice(tRef.current('没有需要保存的修改。', 'Nothing to save.'))
+          return
+        }
+        if (patch.reminders && patch.reminders.notifications === true) requestNotificationPermission()
+        setBusy('save')
+        setError('')
+        setNotice('')
+        try {
+          const value = await apiCall('settingsUpdate', patch)
+          if (!aliveRef.current) return
+          const next = normalizeClientSettings(value && value.settings)
+          setSettings(next)
+          setLoadError('')
+          publishSettings(next)
+          setNotice(tRef.current('设置已保存。', 'Settings saved.'))
+        } catch (saveFailure) {
+          if (aliveRef.current) setError(errorText(tRef.current, saveFailure, DEFAULT_LIMITS))
+        } finally {
+          if (aliveRef.current) setBusy(null)
+        }
+      }
+
+      async function reset() {
+        if (busy !== null) return
+        setBusy('reset')
+        setError('')
+        setNotice('')
+        try {
+          const value = await apiCall('settingsReset')
+          if (!aliveRef.current) return
+          const next = normalizeClientSettings(value && value.settings)
+          setSettings(next)
+          setLoadError('')
+          publishSettings(next)
+          setNotice(tRef.current('已恢复默认设置。', 'Defaults restored.'))
+        } catch (resetFailure) {
+          if (aliveRef.current) setError(errorText(tRef.current, resetFailure, DEFAULT_LIMITS))
+        } finally {
+          if (aliveRef.current) setBusy(null)
+        }
+      }
+
+      // This page mounts inside the Harness settings panel, which does not render
+      // the note wall page's <style>. Include the scoped stylesheet in the tree
+      // (never document.head/body), so the form is styled on its own.
+      return h(React.Fragment, null,
+        h(Styles, { key: 'settings-styles' }),
+        h('div', { className: 'nw-settings-page', key: 'settings-page' },
+          h('div', { className: 'nw-settings-page-head' },
+            h('h3', { className: 'nw-settings-page-title' }, t('便签墙设置', 'Note wall settings')),
+            h('p', { className: 'nw-settings-page-sub' },
+              t(
+                '所有可选功能默认关闭；打开后只影响本机便签墙。也可以从便签墙右上角的「设置」打开同一份设置。',
+                'Every optional feature is off by default; changes only affect this note wall. The same settings are also available from the Settings button on the wall page.',
+              ),
+            ),
+          ),
+          loadError
+            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
+                h('span', { className: 'nw-banner-text' },
+                  t('设置读取失败，已使用默认设置（新功能全部关闭）：', 'Could not read settings; using defaults (new features off): ') + loadError,
+                ),
+              )
+            : null,
+          error
+            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
+                h('span', { className: 'nw-banner-text' }, error),
+              )
+            : null,
+          notice
+            ? h('div', { className: 'nw-banner nw-banner-success', role: 'status' },
+                h('span', { className: 'nw-banner-text' }, notice),
+              )
+            : null,
+          h(SettingsForm, {
+            settings: settings,
+            draft: draft.draft,
+            t: t,
+            busy: busy !== null,
+            onPatchGroup: draft.patchGroup,
+            onPatchField: draft.patchField,
+            onSave: save,
+            onReset: reset,
+          }),
+        ),
+      )
+    }
+
+    function ImportDialog(props) {
+      const t = props.t
+      const busy = props.busy === true
+      const mode = props.mode === 'replace' ? 'replace' : 'merge'
+      const fileName = props.file && typeof props.file.name === 'string' ? props.file.name : ''
+
+      return h('div', {
+        className: 'nw-settings-backdrop',
+        onMouseDown: function (event) {
+          if (event.target === event.currentTarget && !busy) props.onClose()
+        },
+      },
+        h('div', {
+          id: IMPORT_DIALOG_ID,
+          className: 'nw-settings',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-labelledby': IMPORT_DIALOG_TITLE_ID,
+        },
+          h('div', { className: 'nw-settings-head' },
+            h('h3', { id: IMPORT_DIALOG_TITLE_ID, className: 'nw-settings-title' },
+              t('导入完整备份', 'Import a complete backup')),
+            h('button', {
+              type: 'button',
+              className: 'nw-iconbtn',
+              'aria-label': t('关闭导入', 'Close import'),
+              title: t('关闭导入', 'Close import'),
+              ref: props.closeButtonRef,
+              disabled: busy,
+              onClick: props.onClose,
+            }, h(CloseGlyph, { size: 14 })),
+          ),
+          h('div', { className: 'nw-settings-dialog-note' },
+            h('p', { className: 'nw-settings-dialog-text' },
+              t(
+                '这是一份「完整备份 ZIP」（JSON + 图片 + 设置 + 清单）。导入前请确认方式：',
+                'This is a complete backup ZIP (JSON + images + settings + manifest). Choose how to import it:',
+              ),
+            ),
+            fileName
+              ? h('div', { className: 'nw-import-file' },
+                  h('span', { className: 'nw-import-file-name', title: fileName }, fileName),
+                )
+              : null,
+          ),
+          h('div', { className: 'nw-set-section' },
+            h('div', { className: 'nw-set-section-title' }, t('导入方式', 'Import mode')),
+            h('label', { className: 'nw-radio-row' },
+              h('input', {
+                type: 'radio',
+                name: 'nw-import-mode',
+                checked: mode === 'merge',
+                disabled: busy,
+                onChange: function () { props.onChangeMode('merge') },
+              }),
+              h('span', { className: 'nw-radio-text' },
+                h('span', null, t('合并（推荐）', 'Merge (recommended)')),
+                h('span', { className: 'nw-radio-hint' },
+                  t('只新增备份里的便签和文件夹，从不删除现有内容。', 'Only adds the notes and folders in the backup; never deletes what is already here.'),
+                ),
+              ),
+            ),
+            h('label', { className: 'nw-radio-row' },
+              h('input', {
+                type: 'radio',
+                name: 'nw-import-mode',
+                checked: mode === 'replace',
+                disabled: busy,
+                onChange: function () { props.onChangeMode('replace') },
+              }),
+              h('span', { className: 'nw-radio-text' },
+                h('span', null, t('替换', 'Replace')),
+                h('span', { className: 'nw-radio-hint' },
+                  t('导入前会自动备份当前便签墙；随后清空并按备份恢复。', 'The current wall is backed up automatically first, then replaced by the backup.'),
+                ),
+              ),
+            ),
+          ),
+          h('div', { className: 'nw-set-section' },
+            h('label', { className: 'nw-set-row' },
+              h('input', {
+                type: 'checkbox',
+                checked: props.applySettings === true,
+                disabled: busy,
+                onChange: function (event) { props.onChangeApplySettings(event.target.checked) },
+              }),
+              h('span', null, t('同时应用备份里的设置', 'Also apply the settings in the backup')),
+            ),
+            h('p', { className: 'nw-set-hint' },
+              t(
+                '默认保留当前设置；只有勾选后才会用备份里的设置覆盖（关闭时便签墙设置不变）。',
+                'Current settings are kept by default; only a checked box applies the ones in the backup.',
+              ),
+            ),
+          ),
+          props.error
+            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
+                h('span', { className: 'nw-banner-text' }, props.error),
+              )
+            : null,
+          h('div', { className: 'nw-import-actions' },
+            h('button', {
+              type: 'button',
+              className: 'nw-mini',
+              disabled: busy,
+              onClick: props.onClose,
+            }, t('取消', 'Cancel')),
+            h('button', {
+              type: 'button',
+              className: 'nw-mini nw-mini-primary',
+              disabled: busy || !fileName,
+              onClick: props.onConfirm,
+            }, busy ? t('导入中…', 'Importing…') : t('开始导入', 'Start import')),
+          ),
+        ),
+      )
+    }
+
+    function OnboardingGuide(props) {
+      const t = props.t
+      return h('div', {
+        className: 'nw-settings-backdrop',
+        onMouseDown: function (event) {
+          if (event.target === event.currentTarget) props.onKeepOff()
+        },
+      },
+        h('div', {
+          id: ONBOARDING_DIALOG_ID,
+          className: 'nw-settings nw-onboarding',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-labelledby': ONBOARDING_TITLE_ID,
+          'aria-describedby': ONBOARDING_TEXT_ID,
+        },
+          h('div', { className: 'nw-settings-head' },
+            h('h3', { id: ONBOARDING_TITLE_ID, className: 'nw-settings-title' },
+              t('欢迎使用便签墙', 'Welcome to the note wall')),
+          ),
+          h('p', { id: ONBOARDING_TEXT_ID, className: 'nw-settings-dialog-text' },
+            t(
+              '所有可选新功能默认关闭，不会自动开启：',
+              'Every optional new feature is off by default and never enables itself:',
+            ),
+          ),
+          h('ul', { className: 'nw-onboarding-points' },
+            h('li', null, t('分类历史、文件夹、AI 写入默认关闭。', 'Category history, folders and agent writes are off.')),
+            h('li', null, t('提醒、浏览器通知与全局提醒都需要你在设置里主动开启。', 'Reminders, browser notifications and the global alarm must be enabled by you in settings.')),
+            h('li', null, t('「仅数据」模式不会显示、响铃或通知。', '"Data only" mode shows, rings and notifies nothing.')),
+          ),
+          h('div', { className: 'nw-onboarding-actions' },
+            h('button', {
+              type: 'button',
+              className: 'nw-mini nw-mini-primary',
+              ref: props.primaryRef,
+              onClick: props.onKeepOff,
+            }, t('保持关闭', 'Keep everything off')),
+            h('button', {
+              type: 'button',
+              className: 'nw-mini',
+              onClick: props.onOpenSettings,
+            }, t('去设置', 'Open settings')),
           ),
         ),
       )
@@ -1887,8 +2722,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('')
       const tRef = React.useRef(t)
       const settingsRef = React.useRef(settings)
-      const notifiedRef = React.useRef({})
-      const dismissedRef = React.useRef({})
+      const controllerRef = React.useRef(null)
       const aliveRef = React.useRef(true)
       const active = globalAlarmActive(settings)
 
@@ -1942,61 +2776,41 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      // Keep the scheduler's plan in step with an adopted settings document.
       React.useEffect(function () {
-        if (active) return
-        setDue([])
-        setError('')
-      }, [active])
+        settingsRef.current = settings
+        if (controllerRef.current) controllerRef.current.setSettings(settings)
+      }, [settings])
 
+      // One controller owns the interval and every side effect. When the plan is
+      // inactive this effect creates neither a timer nor the controller anything
+      // schedules, and the component renders null below.
       React.useEffect(function () {
-        if (!active) return function () {}
-        let cancelled = false
-        const startedAt = Date.now()
-        let timer = null
-
-        async function tick(first) {
-          let stateValue
-          let settingsValue
-          try {
-            const results = await Promise.all([apiCall('state'), apiCall('settings')])
-            stateValue = results[0]
-            settingsValue = results[1] && results[1].settings
-          } catch (requestError) {
-            return
-          }
-          if (cancelled) return
-          if (settingsValue !== undefined) adoptSettings(settingsValue)
-          const current = normalizeClientSettings(settingsValue !== undefined ? settingsValue : settingsRef.current)
-          if (!globalAlarmActive(current)) return
-          const nowMs = Date.now()
-          const notes = stateValue && Array.isArray(stateValue.notes) ? stateValue.notes : []
-          const catchUp = current.reminders.overdue === true
-          const dueNotes = notes.filter(function (note) {
-            if (!isReminderDue(note, nowMs)) return false
-            if (dismissedRef.current[reminderKey(note)] === true) return false
-            if (first && !catchUp) {
-              const dueMs = Date.parse(note.remindAt)
-              return Number.isFinite(dueMs) && dueMs > startedAt
-            }
-            return true
-          })
-          setDue(dueNotes)
-          const fresh = dueNotes.filter(function (note) {
-            return notifiedRef.current[reminderKey(note)] !== true
-          })
-          if (fresh.length === 0) return
-          for (const note of fresh) notifiedRef.current[reminderKey(note)] = true
-          if (shouldPlayReminderSound(current)) playReminderSound(current.reminders.volume)
-          if (shouldNotifyReminder(current)) {
-            for (const note of fresh) showReminderNotification(note, tRef.current)
-          }
+        if (!active) {
+          setDue([])
+          setError('')
+          return
         }
-
-        void tick(true)
-        timer = setInterval(function () { void tick(false) }, REMINDER_INTERVAL_MS)
+        const controller = createReminderController({
+          settings: settingsRef.current,
+          // The controller's localization hook is the `t(zh, en)` function, not a
+          // getter returning it: notification titles call it directly.
+          t: function (zhText, enText) {
+            const current = tRef.current
+            return typeof current === 'function' ? current(zhText, enText) : zhText
+          },
+          onDueChange: function (notes) {
+            if (!aliveRef.current) return
+            setDue(function (current) {
+              return JSON.stringify(current) === JSON.stringify(notes) ? current : notes
+            })
+          },
+        })
+        controllerRef.current = controller
+        controller.start()
         return function () {
-          cancelled = true
-          clearInterval(timer)
+          controller.dispose()
+          if (controllerRef.current === controller) controllerRef.current = null
         }
       }, [active])
 
@@ -2005,8 +2819,8 @@ window.__ModuleLoader__.load({
         try {
           await apiCall('update', { id: note.id, remindAt: '' })
           if (!aliveRef.current) return
-          dismissedRef.current[reminderKey(note)] = true
-          setDue(function (current) {
+          if (controllerRef.current) controllerRef.current.forget(note)
+          else setDue(function (current) {
             return current.filter(function (item) { return item.id !== note.id })
           })
           publishNotesChanged()
@@ -2026,7 +2840,7 @@ window.__ModuleLoader__.load({
         for (const note of target) {
           try {
             await apiCall('update', { id: note.id, remindAt: '' })
-            dismissedRef.current[reminderKey(note)] = true
+            if (controllerRef.current) controllerRef.current.forget(note)
             cleared += 1
           } catch (completeError) {
             failed[note.id] = true
@@ -2034,16 +2848,18 @@ window.__ModuleLoader__.load({
         }
         if (!aliveRef.current) return
         if (cleared > 0) publishNotesChanged()
-        setDue(function (current) {
-          return current.filter(function (item) { return failed[item.id] === true })
-        })
+        if (!controllerRef.current) {
+          setDue(function (current) {
+            return current.filter(function (item) { return failed[item.id] === true })
+          })
+        }
         if (Object.keys(failed).length > 0) {
           setError(t('有提醒没能清除，请稍后再试。', 'Some reminders could not be cleared; try again.'))
         }
       }
 
       function dismissAll() {
-        for (const note of due) dismissedRef.current[reminderKey(note)] = true
+        if (controllerRef.current) controllerRef.current.dismissAll()
         setDue([])
         setError('')
       }
@@ -2154,11 +2970,29 @@ window.__ModuleLoader__.load({
       const [selectionFolderId, setSelectionFolderId] = React.useState('')
       const [draftRemindAt, setDraftRemindAt] = React.useState('')
       const [categoryHistory, setCategoryHistory] = React.useState(readCategoryHistory)
+      // First-use guide: shown once per browser until either button is pressed.
+      // `initialOnboardingSeen` exists so a test can render the first visit
+      // without a browser storage.
+      const [onboardingOpen, setOnboardingOpen] = React.useState(function () {
+        if (props.initialOnboardingSeen !== undefined) return props.initialOnboardingSeen !== true
+        return onboardingSeen() !== true
+      })
+      const [exportBusy, setExportBusy] = React.useState(false)
+      const [importOpen, setImportOpen] = React.useState(false)
+      const [importFile, setImportFile] = React.useState(null)
+      const [importMode, setImportMode] = React.useState('merge')
+      const [importApplySettings, setImportApplySettings] = React.useState(false)
+      const [importError, setImportError] = React.useState('')
       const textareaRef = React.useRef(null)
       const fileRef = React.useRef(null)
       const colorInputRef = React.useRef(null)
       const searchRef = React.useRef(null)
       const importRef = React.useRef(null)
+      const importButtonRef = React.useRef(null)
+      const importCloseRef = React.useRef(null)
+      const importWasOpenRef = React.useRef(false)
+      const onboardingPrimaryRef = React.useRef(null)
+      const onboardingWasOpenRef = React.useRef(false)
       const signatureButtonRef = React.useRef(null)
       const signatureCloseRef = React.useRef(null)
       const settingsButtonRef = React.useRef(null)
@@ -2284,6 +3118,35 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      // Follow settings saved from the Harness settings page (`settings.section`)
+      // or by the overlay while the wall is open, so the two surfaces never show
+      // different documents. This only adopts an already-validated document; it
+      // never enables anything on its own.
+      React.useEffect(function () {
+        function onSettingsEvent(event) {
+          if (!aliveRef.current) return
+          const next = normalizeClientSettings(event && event.detail)
+          setSettings(next)
+          setSettingsLoadError('')
+          setMotion(next.motion)
+          writePrefs({ motion: next.motion, tone: toneRef.current })
+        }
+        try {
+          if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener(SETTINGS_EVENT, onSettingsEvent)
+          }
+        } catch (error) {
+          // Without the event the page still loads the saved settings on mount.
+        }
+        return function () {
+          try {
+            if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+              window.removeEventListener(SETTINGS_EVENT, onSettingsEvent)
+            }
+          } catch (error) {}
+        }
+      }, [])
+
       React.useEffect(function () {
         const element = textareaRef.current
         if (element && typeof element.focus === 'function') element.focus()
@@ -2352,6 +3215,67 @@ window.__ModuleLoader__.load({
         return function () { document.removeEventListener('keydown', onSettingsKeyDown) }
       }, [settingsOpen])
 
+      // First-use guide: focus its primary action when it opens, restore focus
+      // afterwards, and let Escape behave exactly like 「保持关闭」.
+      React.useEffect(function () {
+        if (onboardingOpen) {
+          onboardingWasOpenRef.current = true
+          if (onboardingPrimaryRef.current && typeof onboardingPrimaryRef.current.focus === 'function') {
+            onboardingPrimaryRef.current.focus()
+          }
+          return
+        }
+        if (onboardingWasOpenRef.current) {
+          onboardingWasOpenRef.current = false
+          if (settingsButtonRef.current && typeof settingsButtonRef.current.focus === 'function') {
+            settingsButtonRef.current.focus()
+          }
+        }
+      }, [onboardingOpen])
+
+      React.useEffect(function () {
+        if (!onboardingOpen) return function () {}
+        function onOnboardingKeyDown(event) {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          markOnboardingSeen()
+          setOnboardingOpen(false)
+        }
+        document.addEventListener('keydown', onOnboardingKeyDown)
+        return function () { document.removeEventListener('keydown', onOnboardingKeyDown) }
+      }, [onboardingOpen])
+
+      // Import dialog: same keyboard/focus contract as the settings dialog.
+      React.useEffect(function () {
+        if (importOpen) {
+          importWasOpenRef.current = true
+          setImportError('')
+          if (importCloseRef.current && typeof importCloseRef.current.focus === 'function') {
+            importCloseRef.current.focus()
+          }
+          return
+        }
+        if (importWasOpenRef.current) {
+          importWasOpenRef.current = false
+          if (importButtonRef.current && typeof importButtonRef.current.focus === 'function') {
+            importButtonRef.current.focus()
+          }
+        }
+      }, [importOpen])
+
+      React.useEffect(function () {
+        if (!importOpen) return function () {}
+        function onImportKeyDown(event) {
+          if (event.key !== 'Escape') return
+          if (pendingRef.current) return
+          event.preventDefault()
+          setImportOpen(false)
+          setImportFile(null)
+        }
+        document.addEventListener('keydown', onImportKeyDown)
+        return function () { document.removeEventListener('keydown', onImportKeyDown) }
+      }, [importOpen])
+
       // Turning folders off hides every folder affordance but keeps the data.
       React.useEffect(function () {
         if (foldersEnabled) return
@@ -2412,10 +3336,6 @@ window.__ModuleLoader__.load({
         || filterTone !== 'all'
         || filterTag !== 'all'
         || (foldersEnabled && filterFolder !== 'all')
-
-      const exportHref = React.useMemo(function () {
-        return 'data:application/json;charset=utf-8,' + encodeURIComponent(serializeNotes(notes))
-      }, [notes])
 
       React.useEffect(function () {
         if (filterTag !== 'all' && tags.indexOf(filterTag) < 0) setFilterTag('all')
@@ -2674,53 +3594,93 @@ window.__ModuleLoader__.load({
       }
 
       function openImport() {
+        if (pendingRef.current || exportBusy) return
         if (importRef.current) importRef.current.click()
       }
 
-      async function onImportFile(event) {
+      /** A chosen `.zip` opens the replace/merge confirmation; nothing uploads yet. */
+      function onImportFile(event) {
         const files = event.target.files
         const file = files && files.length > 0 ? files[0] : null
         event.target.value = ''
         if (!file || pendingRef.current) return
-        beginPending('import')
-        let imported = 0
-        let lastValue
+        if (!isZipFile(file)) {
+          setActionError(t('请选择「完整备份 ZIP」文件（.zip）。', 'Choose a complete backup ZIP file (.zip).'))
+          return
+        }
+        setActionError('')
+        setImportFile(file)
+        setImportMode('merge')
+        setImportApplySettings(false)
+        setImportError('')
+        setImportOpen(true)
+      }
+
+      function closeImport() {
+        if (pendingRef.current) return
+        setImportOpen(false)
+        setImportFile(null)
+        setImportError('')
+      }
+
+      async function confirmImport() {
+        const file = importFile
+        if (!file || pendingRef.current) return
+        beginPending('import-zip')
+        setImportError('')
         try {
-          const raw = await file.text()
-          const parsed = parseImportPayload(raw, limitsRef.current)
-          if (parsed.notes.length === 0) {
-            setActionError(t('没有可导入的便签。', 'No valid notes to import.'))
-            return
-          }
-          for (const note of parsed.notes) {
-            lastValue = await apiCall('add', {
-              text: note.text,
-              tag: note.tag,
-              tone: note.tone,
-              link: note.link,
-              image: '',
-            })
-            imported += 1
-          }
+          const report = await importBackup(file, importMode, importApplySettings)
           if (!aliveRef.current) return
-          loadSeqRef.current += 1
-          accept(lastValue)
-          setNotice(t(
-            '已导入 ' + imported + ' 条便签' + (parsed.skipped > 0 ? '，跳过 ' + parsed.skipped + ' 条无效记录' : '') + '。',
-            'Imported ' + imported + ' note' + (imported === 1 ? '' : 's') + (parsed.skipped > 0 ? ', skipped ' + parsed.skipped + ' invalid' : '') + '.',
-          ))
-        } catch (error) {
-          if (lastValue && aliveRef.current) {
+          const stateValue = report && report.state ? report.state : report
+          if (stateValue && Array.isArray(stateValue.notes)) {
             loadSeqRef.current += 1
-            accept(lastValue)
+            accept(stateValue)
+          } else {
+            setReloadKey(function (value) { return value + 1 })
           }
-          if (aliveRef.current) {
-            const prefix = imported > 0 ? t('已导入 ' + imported + ' 条，之后失败：', imported + ' imported, then failed: ') : ''
-            setActionError(prefix + errorText(t, error, limitsRef.current))
+          setSettingsNotice('')
+          setNotice(backupReportText(tRef.current, report))
+          setImportOpen(false)
+          setImportFile(null)
+          if (report && report.settingsApplied === true) {
+            // Re-read settings so the alarm gates follow the applied document.
+            setReloadKey(function (value) { return value + 1 })
           }
+        } catch (error) {
+          if (aliveRef.current) setImportError(errorText(tRef.current, error, limitsRef.current))
         } finally {
           endPending()
         }
+      }
+
+      async function exportBackup() {
+        if (exportBusy || pendingRef.current) return
+        setExportBusy(true)
+        setActionError('')
+        setNotice('')
+        try {
+          const filename = await downloadBackup()
+          if (!aliveRef.current) return
+          setNotice(t(
+            '已导出完整备份 ' + filename + '（JSON + 图片 + 设置 + 清单）。',
+            'Exported the complete backup ' + filename + ' (JSON + images + settings + manifest).',
+          ))
+        } catch (error) {
+          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          if (aliveRef.current) setExportBusy(false)
+        }
+      }
+
+      function closeOnboarding() {
+        markOnboardingSeen()
+        setOnboardingOpen(false)
+      }
+
+      function openSettingsFromOnboarding() {
+        markOnboardingSeen()
+        setOnboardingOpen(false)
+        setSettingsOpen(true)
       }
 
       function openSignature() {
@@ -3340,23 +4300,29 @@ window.__ModuleLoader__.load({
                 }, t('清除筛选', 'Clear filters'))
               : null,
             h('div', { className: 'nw-toolbar-actions' },
-              h('a', {
-                className: 'nw-mini nw-export',
-                href: exportHref,
-                download: 'dsh-note-wall-notes.json',
-                title: t('导出便签 JSON（不含图片文件，不是完整备份）', 'Export notes as JSON (image files not included; not a full backup)'),
-              }, t('导出 JSON', 'Export JSON')),
               h('button', {
                 type: 'button',
                 className: 'nw-mini',
-                disabled: pending !== null,
+                disabled: pending !== null || exportBusy,
+                title: t(
+                  '完整备份 ZIP：便签 JSON + 图片 + 设置 + 清单（默认包含设置）',
+                  'Complete backup ZIP: note JSON + images + settings + manifest (settings included by default)',
+                ),
+                onClick: function () { void exportBackup() },
+              }, exportBusy ? t('导出中…', 'Exporting…') : t('完整备份 ZIP', 'Complete backup ZIP')),
+              h('button', {
+                type: 'button',
+                className: 'nw-mini',
+                ref: importButtonRef,
+                disabled: pending !== null || exportBusy,
+                title: t('从完整备份 ZIP 导入便签、图片与设置', 'Import notes, images and settings from a complete backup ZIP'),
                 onClick: openImport,
-              }, t('导入 JSON', 'Import JSON')),
+              }, t('导入完整备份', 'Import backup')),
               h('input', {
                 ref: importRef,
                 type: 'file',
                 className: 'nw-file-input',
-                accept: 'application/json,.json',
+                accept: 'application/zip,.zip',
                 onChange: onImportFile,
               }),
             ),
@@ -3619,6 +4585,31 @@ window.__ModuleLoader__.load({
                 onClose: function () { setSettingsOpen(false) },
               })
             : null,
+          importOpen
+            ? h(ImportDialog, {
+                key: 'import',
+                t: t,
+                file: importFile,
+                mode: importMode,
+                applySettings: importApplySettings,
+                busy: pending === 'import-zip',
+                error: importError,
+                closeButtonRef: importCloseRef,
+                onChangeMode: setImportMode,
+                onChangeApplySettings: setImportApplySettings,
+                onConfirm: function () { void confirmImport() },
+                onClose: closeImport,
+              })
+            : null,
+          onboardingOpen
+            ? h(OnboardingGuide, {
+                key: 'onboarding',
+                t: t,
+                primaryRef: onboardingPrimaryRef,
+                onKeepOff: closeOnboarding,
+                onOpenSettings: openSettingsFromOnboarding,
+              })
+            : null,
         ),
       )
     }
@@ -3667,6 +4658,38 @@ window.__ModuleLoader__.load({
           order: 500,
         }, function NoteWallReminderOverlay() {
           return h(ReminderOverlay, { ctx: ctx })
+        })
+      })
+
+      // v1.2.0-C: also register the same settings as a Harness settings page
+      // (`settings.section`, a list slot declared by the settings shell). The
+      // page shares SettingsForm with the in-page dialog; the top-right 「设置」
+      // button stays as a shortcut. The label is a thunk so it follows the
+      // active locale without re-registering.
+      ctx.slots.inject('settings.section', function () {
+        return ctx.slots.register({
+          name: 'settings.section',
+          id: 'note-wall',
+          order: 60,
+          label: function () {
+            return isZhLocale(ctx) ? '便签墙' : 'Note wall'
+          },
+        }, function NoteWallSettingsSection(sectionProps) {
+          return h(SettingsSection, Object.assign({}, sectionProps, { ctx: ctx }))
+        })
+      })
+
+      // Optional navigation glyph for that section; the shell owns the button
+      // and falls back to its own gear when this is not registered.
+      ctx.slots.inject('settings.section.icon', function () {
+        return ctx.slots.register({
+          name: 'settings.section.icon',
+          id: 'note-wall',
+        }, function NoteWallSettingsIcon(iconProps) {
+          const size = iconProps && typeof iconProps.size === 'number' && iconProps.size > 0
+            ? iconProps.size
+            : 16
+          return h(NoteGlyph, { size: size })
         })
       })
     }

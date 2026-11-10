@@ -54,7 +54,7 @@ async function setup(options = {}) {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
   }
-  assert.equal(routes.length, 3, 'expected the note, upload and image routes')
+  assert.equal(routes.length, 4, 'expected the note, upload, backup and image routes')
   const route = routes.find(entry => entry.kind === 'exact' && entry.path === '/plugins/dsh-note-wall/api')
   const uploadRoute = routes.find(entry => entry.kind === 'exact' && entry.path === '/plugins/dsh-note-wall/image')
   const imageRoute = routes.find(entry => entry.kind === 'prefix' && entry.path === '/plugins/dsh-note-wall/image')
