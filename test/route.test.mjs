@@ -639,7 +639,7 @@ test('settings default to agent write off, merge updates and reset', async () =>
       agentWrite: { enabled: false },
       categoryHistory: { enabled: false, limit: 8 },
       folders: { enabled: false },
-      imageDisplay: 'large',
+      imageDisplay: 'thumbnail',
       reminders: { enabled: false, sound: false, volume: 0.7, notifications: false, overdue: true },
       globalAlarm: { enabled: false, mode: 'overlay', sound: false },
       motion: true,

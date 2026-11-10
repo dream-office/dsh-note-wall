@@ -26,8 +26,31 @@ window.__ModuleLoader__.load({
       maxTagChars: 24,
       maxLinkChars: 2048,
       maxImageBytes: 3 * 1024 * 1024,
+      maxFolders: 100,
+      maxFolderNameChars: 40,
     }
     const CLOCK_INTERVAL_MS = 30000
+
+    // v1.2.0 client defaults mirror lib/settings.js. Every optional feature is
+    // off except the compact thumbnail display, which is the user preference;
+    // the panel lets the user opt into the rest explicitly.
+    const DEFAULT_CLIENT_SETTINGS = {
+      agentWrite: { enabled: false },
+      categoryHistory: { enabled: false, limit: 8 },
+      folders: { enabled: false },
+      imageDisplay: 'thumbnail',
+      reminders: { enabled: false, sound: false, volume: 0.7, notifications: false, overdue: true },
+      globalAlarm: { enabled: false, mode: 'overlay', sound: false },
+      motion: true,
+    }
+    const IMAGE_DISPLAY_MODES = ['thumbnail', 'icon', 'large']
+    const GLOBAL_ALARM_MODES = ['overlay', 'banner', 'silent']
+    const CATEGORY_HISTORY_KEY = 'dsh-note-wall:categories-v1'
+    const SETTINGS_EVENT = 'dsh-note-wall:settings'
+    const NOTES_EVENT = 'dsh-note-wall:notes-changed'
+    const SETTINGS_PANEL_ID = 'nw-settings-panel'
+    const REMINDER_OVERLAY_ID = 'note-wall-reminders'
+    const REMINDER_INTERVAL_MS = 30000
 
     // A-version signature (see DESIGN-SIGNATURE.md): footer mark + console line
     // + a three-tap author note. No storage, no network, no data collection.
@@ -127,6 +150,10 @@ window.__ModuleLoader__.load({
         }
       }
       if (options.tag && options.tag !== 'all' && (!note || note.tag !== options.tag)) return false
+      if (options.folderId !== undefined && options.folderId !== 'all') {
+        const folderId = note && typeof note.folderId === 'string' ? note.folderId : ''
+        if (folderId !== options.folderId) return false
+      }
       return true
     }
 
@@ -134,6 +161,349 @@ window.__ModuleLoader__.load({
       return (Array.isArray(notes) ? notes : []).filter(function (note) {
         return noteMatchesFilter(note, filters)
       })
+    }
+
+    function cloneSettingsDocument(settings) {
+      return JSON.parse(JSON.stringify(settings !== null && typeof settings === 'object' ? settings : DEFAULT_CLIENT_SETTINGS))
+    }
+
+    function readBooleanSetting(value, fallback) {
+      return typeof value === 'boolean' ? value : fallback
+    }
+
+    function readEnumSetting(value, allowed, fallback) {
+      return typeof value === 'string' && allowed.indexOf(value) >= 0 ? value : fallback
+    }
+
+    function readNumberSetting(value, min, max, fallback) {
+      return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : fallback
+    }
+
+    function readIntegerSetting(value, min, max, fallback) {
+      return Number.isInteger(value) && value >= min && value <= max ? value : fallback
+    }
+
+    /** Tolerant client-side view of the Host settings document. */
+    function normalizeClientSettings(raw) {
+      const source = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+      const base = cloneSettingsDocument(DEFAULT_CLIENT_SETTINGS)
+      const sourceGroup = function (key) {
+        const value = source[key]
+        return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
+      }
+      const agentWrite = sourceGroup('agentWrite')
+      base.agentWrite.enabled = readBooleanSetting(agentWrite.enabled, base.agentWrite.enabled)
+
+      const categoryHistory = sourceGroup('categoryHistory')
+      base.categoryHistory.enabled = readBooleanSetting(categoryHistory.enabled, base.categoryHistory.enabled)
+      base.categoryHistory.limit = readIntegerSetting(categoryHistory.limit, 1, 50, base.categoryHistory.limit)
+
+      const folders = sourceGroup('folders')
+      base.folders.enabled = readBooleanSetting(folders.enabled, base.folders.enabled)
+
+      base.imageDisplay = readEnumSetting(source.imageDisplay, IMAGE_DISPLAY_MODES, base.imageDisplay)
+
+      const reminders = sourceGroup('reminders')
+      base.reminders.enabled = readBooleanSetting(reminders.enabled, base.reminders.enabled)
+      base.reminders.sound = readBooleanSetting(reminders.sound, base.reminders.sound)
+      base.reminders.volume = readNumberSetting(reminders.volume, 0, 1, base.reminders.volume)
+      base.reminders.notifications = readBooleanSetting(reminders.notifications, base.reminders.notifications)
+      base.reminders.overdue = readBooleanSetting(reminders.overdue, base.reminders.overdue)
+
+      const globalAlarm = sourceGroup('globalAlarm')
+      base.globalAlarm.enabled = readBooleanSetting(globalAlarm.enabled, base.globalAlarm.enabled)
+      base.globalAlarm.mode = readEnumSetting(globalAlarm.mode, GLOBAL_ALARM_MODES, base.globalAlarm.mode)
+      base.globalAlarm.sound = readBooleanSetting(globalAlarm.sound, base.globalAlarm.sound)
+
+      base.motion = readBooleanSetting(source.motion, base.motion)
+      return base
+    }
+
+    /** A settings sub-document is enabled only when it explicitly says so. */
+    function featureEnabled(settings, key) {
+      if (settings === null || typeof settings !== 'object') return false
+      const group = settings[key]
+      return group !== null && typeof group === 'object' && group.enabled === true
+    }
+
+    function resolveImageDisplay(value) {
+      if (typeof value === 'string') {
+        return IMAGE_DISPLAY_MODES.indexOf(value) >= 0 ? value : DEFAULT_CLIENT_SETTINGS.imageDisplay
+      }
+      const settings = value !== null && typeof value === 'object' ? value : {}
+      return readEnumSetting(settings.imageDisplay, IMAGE_DISPLAY_MODES, DEFAULT_CLIENT_SETTINGS.imageDisplay)
+    }
+
+    /**
+     * Folder filter options in display order: all / uncategorized ('') / each
+     * folder. Kept pure so the page and the tests agree on the exact list.
+     */
+    function normalizeFolders(list) {
+      const folders = []
+      for (const folder of Array.isArray(list) ? list : []) {
+        if (folder === null || typeof folder !== 'object') continue
+        if (typeof folder.id !== 'string' || folder.id.length === 0) continue
+        if (typeof folder.name !== 'string' || folder.name.length === 0) continue
+        if (folders.some(function (item) { return item.id === folder.id })) continue
+        folders.push({ id: folder.id, name: folder.name })
+      }
+      return folders
+    }
+
+    function folderFilterOptions(folders) {
+      return [{ id: 'all' }, { id: '' }].concat(normalizeFolders(folders))
+    }
+
+    function padTwo(value) {
+      return value < 10 ? '0' + value : String(value)
+    }
+
+    /** ISO timestamp -> the `YYYY-MM-DDTHH:mm` local value a datetime-local wants. */
+    function toLocalDateTimeInput(iso) {
+      if (typeof iso !== 'string' || iso.trim().length === 0) return ''
+      const ms = Date.parse(iso)
+      if (!Number.isFinite(ms)) return ''
+      const date = new Date(ms)
+      return date.getFullYear()
+        + '-' + padTwo(date.getMonth() + 1)
+        + '-' + padTwo(date.getDate())
+        + 'T' + padTwo(date.getHours())
+        + ':' + padTwo(date.getMinutes())
+    }
+
+    const LOCAL_DATE_TIME_INPUT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
+
+    /** `YYYY-MM-DDTHH:mm` local value -> normalized ISO; '' means no reminder. */
+    function fromLocalDateTimeInput(value) {
+      if (typeof value !== 'string') return ''
+      const text = value.trim()
+      if (text.length === 0) return ''
+      const match = LOCAL_DATE_TIME_INPUT.exec(text)
+      if (match === null) return ''
+      const year = Number(match[1])
+      const month = Number(match[2])
+      const day = Number(match[3])
+      const hour = Number(match[4])
+      const minute = Number(match[5])
+      const second = match[6] === undefined ? 0 : Number(match[6])
+      if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return ''
+      const date = new Date(year, month - 1, day, hour, minute, second, 0)
+      // Reject values the Date constructor would silently roll over (Feb 30).
+      if (
+        date.getFullYear() !== year
+        || date.getMonth() !== month - 1
+        || date.getDate() !== day
+        || date.getHours() !== hour
+        || date.getMinutes() !== minute
+      ) {
+        return ''
+      }
+      return date.toISOString()
+    }
+
+    function isReminderDue(note, nowMs) {
+      if (note === null || typeof note !== 'object') return false
+      if (typeof note.remindAt !== 'string' || note.remindAt.length === 0) return false
+      const dueMs = Date.parse(note.remindAt)
+      const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now()
+      return Number.isFinite(dueMs) && dueMs <= now
+    }
+
+    /** Global reminder UI is armed only when both features say so and mode !== silent. */
+    function globalAlarmActive(settings) {
+      if (!featureEnabled(settings, 'reminders')) return false
+      if (!featureEnabled(settings, 'globalAlarm')) return false
+      return readEnumSetting(settings.globalAlarm.mode, GLOBAL_ALARM_MODES, 'overlay') !== 'silent'
+    }
+
+    function shouldNotifyReminder(settings) {
+      if (!globalAlarmActive(settings)) return false
+      return settings.reminders.notifications === true
+    }
+
+    function shouldPlayReminderSound(settings) {
+      if (!globalAlarmActive(settings)) return false
+      return settings.reminders.sound === true
+    }
+
+    function categoryHistorySize(limit) {
+      return readIntegerSetting(limit, 1, 50, DEFAULT_CLIENT_SETTINGS.categoryHistory.limit)
+    }
+
+    /** Move a tag to the front, dedupe, trim; an empty tag only trims the list. */
+    function nextCategoryHistory(list, tag, limit) {
+      const size = categoryHistorySize(limit)
+      const value = typeof tag === 'string' ? tag.trim() : ''
+      const next = []
+      if (value.length > 0) next.push(value)
+      for (const item of Array.isArray(list) ? list : []) {
+        if (typeof item !== 'string') continue
+        const candidate = item.trim()
+        if (candidate.length === 0 || candidate === value || next.indexOf(candidate) >= 0) continue
+        next.push(candidate)
+        if (next.length >= size) break
+      }
+      return next.slice(0, size)
+    }
+
+    function readCategoryHistory() {
+      try {
+        if (typeof localStorage === 'undefined') return []
+        const raw = localStorage.getItem(CATEGORY_HISTORY_KEY)
+        if (!raw) return []
+        const parsed = JSON.parse(raw)
+        if (!Array.isArray(parsed)) return []
+        const history = []
+        for (const item of parsed) {
+          if (typeof item !== 'string') continue
+          const value = item.trim()
+          if (value.length === 0 || history.indexOf(value) >= 0) continue
+          history.push(value)
+          if (history.length >= 50) break
+        }
+        return history
+      } catch (error) {
+        return []
+      }
+    }
+
+    function writeCategoryHistory(list) {
+      try {
+        if (typeof localStorage === 'undefined') return
+        localStorage.setItem(CATEGORY_HISTORY_KEY, JSON.stringify(Array.isArray(list) ? list : []))
+      } catch (error) {
+        // The history is a convenience; failing to persist it never breaks a note.
+      }
+    }
+
+    /**
+     * Build the flat/nested Host patch for a settings dialog draft. Only fields
+     * that actually differ are sent, and unknown hosts fields stay untouched.
+     */
+    function settingsPatch(current, draft) {
+      const before = current !== null && typeof current === 'object' ? current : DEFAULT_CLIENT_SETTINGS
+      const after = draft !== null && typeof draft === 'object' ? draft : DEFAULT_CLIENT_SETTINGS
+      const patch = {}
+      for (const group of ['agentWrite', 'categoryHistory', 'folders', 'reminders', 'globalAlarm']) {
+        const beforeGroup = before[group] !== null && typeof before[group] === 'object' ? before[group] : {}
+        const afterGroup = after[group] !== null && typeof after[group] === 'object' ? after[group] : {}
+        let groupPatch
+        for (const field of Object.keys(afterGroup)) {
+          if (afterGroup[field] === beforeGroup[field]) continue
+          if (groupPatch === undefined) groupPatch = {}
+          groupPatch[field] = afterGroup[field]
+        }
+        if (groupPatch !== undefined) patch[group] = groupPatch
+      }
+      if (after.imageDisplay !== before.imageDisplay) patch.imageDisplay = after.imageDisplay
+      if ((after.motion === true) !== (before.motion === true)) patch.motion = after.motion === true
+      return patch
+    }
+
+    function reminderKey(note) {
+      if (note === null || typeof note !== 'object') return ''
+      return String(note.id) + '@' + String(note.remindAt)
+    }
+
+    function notificationPermissionState() {
+      try {
+        if (typeof Notification === 'undefined') return 'unsupported'
+        return typeof Notification.permission === 'string' ? Notification.permission : 'default'
+      } catch (error) {
+        return 'unsupported'
+      }
+    }
+
+    /** Must run synchronously inside a user gesture; never called on page load. */
+    function requestNotificationPermission() {
+      try {
+        if (typeof Notification === 'undefined' || typeof Notification.requestPermission !== 'function') return
+        if (Notification.permission !== 'default') return
+        const result = Notification.requestPermission()
+        if (result && typeof result.catch === 'function') result.catch(function () {})
+      } catch (error) {
+        // Denied or unsupported: the page keeps working without notifications.
+      }
+    }
+
+    function showReminderNotification(note, t) {
+      try {
+        if (notificationPermissionState() !== 'granted') return
+        const body = note && typeof note.text === 'string' ? note.text.slice(0, 160) : ''
+        const notification = new Notification(t('便签提醒', 'Note reminder'), {
+          body: body,
+          tag: 'dsh-note-wall:' + String(note && note.id),
+        })
+        if (notification && typeof notification.close === 'function') {
+          setTimeout(function () { try { notification.close() } catch (error) {} }, 12000)
+        }
+      } catch (error) {
+        // Some shells expose Notification but refuse construction.
+      }
+    }
+
+    function playReminderSound(volume) {
+      try {
+        const Ctor = typeof window !== 'undefined'
+          ? window.AudioContext || window.webkitAudioContext
+          : undefined
+        if (typeof Ctor !== 'function') return
+        const context = new Ctor()
+        const level = typeof volume === 'number' && Number.isFinite(volume)
+          ? Math.max(0, Math.min(1, volume))
+          : DEFAULT_CLIENT_SETTINGS.reminders.volume
+        const gain = context.createGain()
+        gain.gain.value = level * 0.2
+        const oscillator = context.createOscillator()
+        oscillator.type = 'sine'
+        oscillator.frequency.value = 880
+        oscillator.connect(gain)
+        gain.connect(context.destination)
+        oscillator.start()
+        oscillator.stop(context.currentTime + 0.16)
+        if (typeof context.resume === 'function') {
+          const resumed = context.resume()
+          if (resumed && typeof resumed.catch === 'function') resumed.catch(function () {})
+        }
+        setTimeout(function () {
+          try { if (typeof context.close === 'function') context.close() } catch (error) {}
+        }, 900)
+      } catch (error) {
+        // Audio is optional; an autoplay refusal must never break the page.
+      }
+    }
+
+    let settingsCache = null
+
+    function publishSettings(settings) {
+      const next = normalizeClientSettings(settings)
+      settingsCache = next
+      try {
+        if (
+          typeof window !== 'undefined'
+          && typeof window.dispatchEvent === 'function'
+          && typeof CustomEvent === 'function'
+        ) {
+          window.dispatchEvent(new CustomEvent(SETTINGS_EVENT, { detail: next }))
+        }
+      } catch (error) {
+        // The event is an optimization; the overlay also reads settings itself.
+      }
+    }
+
+    /** Tell the wall page that another surface (the overlay) changed notes. */
+    function publishNotesChanged() {
+      try {
+        if (
+          typeof window !== 'undefined'
+          && typeof window.dispatchEvent === 'function'
+          && typeof CustomEvent === 'function'
+        ) {
+          window.dispatchEvent(new CustomEvent(NOTES_EVENT))
+        }
+      } catch (error) {
+        // The page still refreshes on its own next action.
+      }
     }
 
     function isImportableLink(link, maxChars) {
@@ -252,7 +622,21 @@ window.__ModuleLoader__.load({
       window.__DSH_NOTE_WALL_TEST__.serializeNotes = serializeNotes
       window.__DSH_NOTE_WALL_TEST__.parseImportPayload = parseImportPayload
       window.__DSH_NOTE_WALL_TEST__.DEFAULT_LIMITS = DEFAULT_LIMITS
+      window.__DSH_NOTE_WALL_TEST__.DEFAULT_CLIENT_SETTINGS = DEFAULT_CLIENT_SETTINGS
+      window.__DSH_NOTE_WALL_TEST__.normalizeClientSettings = normalizeClientSettings
+      window.__DSH_NOTE_WALL_TEST__.featureEnabled = featureEnabled
+      window.__DSH_NOTE_WALL_TEST__.resolveImageDisplay = resolveImageDisplay
+      window.__DSH_NOTE_WALL_TEST__.folderFilterOptions = folderFilterOptions
+      window.__DSH_NOTE_WALL_TEST__.toLocalDateTimeInput = toLocalDateTimeInput
+      window.__DSH_NOTE_WALL_TEST__.fromLocalDateTimeInput = fromLocalDateTimeInput
+      window.__DSH_NOTE_WALL_TEST__.isReminderDue = isReminderDue
+      window.__DSH_NOTE_WALL_TEST__.globalAlarmActive = globalAlarmActive
+      window.__DSH_NOTE_WALL_TEST__.shouldNotifyReminder = shouldNotifyReminder
+      window.__DSH_NOTE_WALL_TEST__.shouldPlayReminderSound = shouldPlayReminderSound
+      window.__DSH_NOTE_WALL_TEST__.nextCategoryHistory = nextCategoryHistory
+      window.__DSH_NOTE_WALL_TEST__.settingsPatch = settingsPatch
       window.__DSH_NOTE_WALL_TEST__.NoteCard = NoteCard
+      window.__DSH_NOTE_WALL_TEST__.NoteWallPage = NoteWallPage
     }
 
     // ---------------------------------------------------------------------------
@@ -416,6 +800,22 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Short local reminder label (month/day + hour:minute) for cards and overlay. */
+    function formatReminderTime(iso, locale) {
+      const then = Date.parse(iso)
+      if (!Number.isFinite(then)) return ''
+      try {
+        return new Date(then).toLocaleString(locale || undefined, {
+          month: 'numeric',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      } catch (error) {
+        return formatAbsolute(iso, locale)
+      }
+    }
+
     function imageUrl(id) {
       return IMAGE_PATH_PREFIX + encodeURIComponent(id)
     }
@@ -482,6 +882,16 @@ window.__ModuleLoader__.load({
         'import-shape': t('JSON 里没有 notes 数组。', 'The JSON has no notes array.'),
         'store-unavailable': t('便签存储暂时不可用，请查看 Harness 日志。', 'Note storage is unavailable; check the Harness log.'),
         'store-corrupt-unreadable': t('便签存储损坏且无法保留原文件，读写已停止。', 'Note storage is damaged and could not be preserved; reads and writes are stopped.'),
+        'settings-unavailable': t('便签墙设置暂时不可用，请查看 Harness 日志。', 'Note wall settings are unavailable; check the Harness log.'),
+        'settings-invalid': t('设置内容不完整。', 'The settings payload is incomplete.'),
+        'settings-value-invalid': t('有一项设置的值无效，未保存。', 'One setting value is invalid, so nothing was saved.'),
+        'note-remind-invalid': t('提醒时间无法识别。', 'That reminder time is not valid.'),
+        'note-folder-invalid': t('文件夹不存在，请刷新后再试。', 'That folder does not exist; refresh and try again.'),
+        'folder-name-required': t('文件夹名称不能为空。', 'A folder name is required.'),
+        'folder-name-too-long': t('文件夹名称最多 ' + codes.maxFolderNameChars + ' 个字符。', 'Folder names are limited to ' + codes.maxFolderNameChars + ' characters.'),
+        'folder-duplicate': t('已经有同名文件夹了。', 'A folder with that name already exists.'),
+        'folder-limit-reached': t('最多只能有 ' + codes.maxFolders + ' 个文件夹。', 'The wall holds up to ' + codes.maxFolders + ' folders.'),
+        'folder-not-found': t('这个文件夹已不存在。', 'That folder no longer exists.'),
         'internal': t('便签保存失败，请查看 Harness 日志。', 'Saving the note failed; check the Harness log.'),
         'unknown-action': t('未知操作。', 'Unknown action.'),
       }
@@ -573,6 +983,32 @@ window.__ModuleLoader__.load({
       return h('svg', svgProps(size),
         h('path', { key: 'big', d: 'M12 3.5l1.7 4.6 4.8 1.7-4.8 1.7L12 16.1l-1.7-4.6-4.8-1.7 4.8-1.7z' }),
         h('path', { key: 'small', d: 'M18.2 15.2l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z' }),
+      )
+    }
+
+    function GearGlyph(props) {
+      const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 15
+      return h('svg', svgProps(size),
+        h('circle', { key: 'hub', cx: 12, cy: 12, r: 3.2 }),
+        h('path', {
+          key: 'ring',
+          d: 'M12 3.4v2.1M12 18.5v2.1M3.4 12h2.1M18.5 12h2.1M5.9 5.9l1.5 1.5M16.6 16.6l1.5 1.5M18.1 5.9l-1.5 1.5M7.4 16.6l-1.5 1.5',
+        }),
+      )
+    }
+
+    function ClockGlyph(props) {
+      const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 13
+      return h('svg', svgProps(size),
+        h('circle', { key: 'face', cx: 12, cy: 12, r: 8.4 }),
+        h('path', { key: 'hands', d: 'M12 7.6V12l3 1.8' }),
+      )
+    }
+
+    function FolderGlyph(props) {
+      const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 14
+      return h('svg', svgProps(size),
+        h('path', { key: 'body', d: 'M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5V18A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z' }),
       )
     }
 
@@ -726,6 +1162,52 @@ window.__ModuleLoader__.load({
 .nw-mini-danger{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-secondary)}
 .nw-mini-danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
 
+/* v1.2.0: settings dialog, folders, reminders, category history */
+.nw-settings-backdrop{position:fixed;inset:0;z-index:70;display:flex;align-items:flex-start;justify-content:center;padding:64px 16px 24px;box-sizing:border-box;overflow:auto;background:color-mix(in srgb,var(--dsw-alias-bg-base) 34%,transparent)}
+.nw-settings{width:min(540px,100%);max-height:calc(100vh - 96px);overflow:auto;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 18px 48px rgba(0,0,0,.18)}
+.nw-settings-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.nw-settings-title{margin:0;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.nw-settings-body{display:flex;flex-direction:column;gap:14px}
+.nw-set-section{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent)}
+.nw-set-section-title{font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--dsw-alias-label-primary)}
+.nw-set-row{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dsw-alias-label-primary);cursor:pointer;min-height:22px}
+.nw-set-row input[type="checkbox"]{width:14px;height:14px;flex:none;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
+.nw-set-row:has(input:disabled){opacity:.5;cursor:default}
+.nw-set-inline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
+.nw-set-inline select{height:26px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px}
+.nw-set-range{width:150px;accent-color:var(--dsw-alias-brand-primary)}
+.nw-set-val{min-width:36px;font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}
+.nw-set-hint{margin:0;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}
+.nw-set-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding-top:2px}
+.nw-set-foot-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
+.nw-folder-panel{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
+.nw-folder-form{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.nw-folder-input{height:28px;min-width:0;flex:1 1 150px;box-sizing:border-box;padding:0 9px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px}
+.nw-folder-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--dsw-alias-label-primary);min-height:26px}
+.nw-folder-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 120px}
+.nw-folder-empty{font-size:11.5px;color:var(--dsw-alias-label-tertiary)}
+.nw-select-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);font-size:12px;color:var(--dsw-alias-label-primary)}
+.nw-select-bar select{height:26px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px}
+.nw-note-select{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 80%,transparent);cursor:pointer}
+.nw-select-check{width:14px;height:14px;flex:none;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
+.nw-note-folder{display:inline-flex;align-items:center;gap:5px;align-self:flex-start;max-width:100%;padding:1px 8px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 55%,transparent);font-size:11px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 82%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-note-remind{display:inline-flex;align-items:center;gap:5px;align-self:flex-start;max-width:100%;padding:2px 8px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 55%,transparent);font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 78%,transparent)}
+.nw-note-remind-due{border-color:var(--dsw-alias-state-error-secondary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-state-error-primary)}
+.nw-remind-field{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 9px;border-radius:9px;border:.5px solid color-mix(in srgb,var(--dsw-alias-label-primary) 16%,transparent);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 45%,transparent);color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent)}
+.nw-remind-field:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px;background:var(--dsw-alias-bg-layer-1)}
+.nw-remind-input{width:148px;min-width:96px;border:none;outline:none;background:transparent;font-family:inherit;font-size:12px;color:var(--dsw-alias-label-primary)}
+.nw-edit-remind{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary)}
+.nw-edit-remind input[type="datetime-local"]{height:26px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11.5px}
+.nw-cat-history{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-top:8px}
+.nw-cat-label{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.nw-cat-chip{height:24px;padding:0 9px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 60%,transparent);color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);font-family:inherit;font-size:11.5px;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-cat-chip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.nw-cat-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-note-image{display:block;width:100%;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2)}
+.nw-note-image img{display:block;width:100%;max-height:190px;height:auto;object-fit:cover}
+.nw-note-image:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-note-thumb-icon{border-radius:8px}
+
 .nw-banner{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:12px;font-size:12px;line-height:1.6;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
 .nw-banner-error{border-color:var(--dsw-alias-state-error-secondary);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,var(--dsw-alias-bg-layer-1))}
 .nw-banner-text{flex:1;min-width:0;overflow-wrap:anywhere}
@@ -759,6 +1241,35 @@ window.__ModuleLoader__.load({
 @keyframes nw-focus{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent)}100%{box-shadow:0 0 0 6px transparent}}
 @media (max-width:720px){.nw-page{padding:20px 16px 36px}.nw-compose{padding:16px 16px 12px;border-radius:18px}.nw-compose-input{min-height:76px;font-size:16.5px}.nw-compose-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-kbd{display:none}.nw-tag-input{width:104px}.nw-grid{grid-template-columns:1fr}.nw-count{font-size:11px}}
 @media (prefers-reduced-motion:reduce){.nw-swatch,.nw-note,.nw-note-actions,.nw-compose,.nw-add,.nw-spinner{transition:none;animation:none}.nw-motion .nw-note{animation:none;transform:none}.nw-motion .nw-note:hover{transform:none}.nw-motion .nw-compose:focus-within{animation:none}.nw-motion .nw-swatch-selected::before{animation:none}.nw-motion .nw-add:not(:disabled):active{transform:none}.nw-motion .nw-swatch:hover{transform:none}.nw-motion .nw-signature{transition:none}.nw-motion .nw-signature-pop{animation:none}}
+`
+
+    // The reminder surface lives in `shell.overlay`, a fixed layer owned by the
+    // host frame. The layer is click-through; only the reminder card opts into
+    // pointer events, so the rest of the Harness UI stays usable. No global
+    // stylesheet is injected and nothing is written to document.body/head.
+    const OVERLAY_CSS = `
+.nw-ov-layer{position:fixed;inset:0;z-index:950;display:flex;align-items:flex-end;justify-content:flex-end;padding:18px;box-sizing:border-box;pointer-events:none}
+.nw-ov-layer.nw-ov-banner{align-items:flex-start;justify-content:center}
+.nw-ov-card{pointer-events:auto;display:flex;flex-direction:column;gap:8px;width:min(330px,100%);max-height:min(62vh,440px);overflow:auto;box-sizing:border-box;padding:12px 14px;border-radius:16px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:0 14px 38px rgba(0,0,0,.22);font-size:12px;line-height:1.55}
+.nw-ov-banner .nw-ov-card{width:min(480px,100%);max-height:min(42vh,320px)}
+.nw-ov-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.nw-ov-title{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.nw-ov-count{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.nw-ov-list{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.nw-ov-item{display:flex;align-items:flex-start;gap:8px;padding:8px 9px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,var(--dsw-alias-brand-primary)) 7%,var(--dsw-alias-bg-layer-1))}
+.nw-ov-item-due{border-color:var(--dsw-alias-state-error-secondary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 9%,var(--dsw-alias-bg-layer-1))}
+.nw-ov-item-body{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.nw-ov-item-text{margin:0;font-size:12.5px;line-height:1.5;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.nw-ov-item-time{font-size:10.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 66%,transparent)}
+.nw-ov-item-due .nw-ov-item-time{color:var(--dsw-alias-state-error-primary)}
+.nw-ov-error{margin:0;font-size:11.5px;color:var(--dsw-alias-state-error-primary)}
+.nw-ov-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.nw-ov-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:26px;padding:0 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11.5px;cursor:pointer}
+.nw-ov-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.nw-ov-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-ov-btn-primary{border-color:var(--dsw-alias-button-primary-fill);background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base)}
+.nw-ov-btn-primary:hover{background:var(--dsw-alias-button-primary-hover)}
+.nw-ov-btn:disabled{opacity:.6;cursor:default}
 `
 
     function Styles() {
@@ -806,6 +1317,14 @@ window.__ModuleLoader__.load({
         ? (editing.imagePreview || (editing.image ? imageUrl(editing.image) : ''))
         : ''
 
+      const imageDisplay = resolveImageDisplay(props.imageDisplay)
+      const remindersEnabled = props.remindersEnabled === true
+      const remindersOn = featureEnabled(props.settings, 'reminders') || remindersEnabled
+      const folderLabel = editing === null && typeof props.folderName === 'string' ? props.folderName : ''
+      const selectable = props.selectable === true && editing === null
+      const reminderIso = editing === null && remindersOn && typeof note.remindAt === 'string' ? note.remindAt : ''
+      const reminderDue = reminderIso.length > 0 && isReminderDue(note, props.now)
+
       function pickEditImage() {
         if (editFileRef.current) editFileRef.current.click()
       }
@@ -852,6 +1371,31 @@ window.__ModuleLoader__.load({
                 props.onChangeEdit(Object.assign({}, editing, { link: event.target.value }))
               },
             }),
+            remindersEnabled
+              ? h('div', { className: 'nw-edit-remind' },
+                  h('span', null, t('提醒时间', 'Remind at')),
+                  h('input', {
+                    type: 'datetime-local',
+                    value: typeof editing.remindInput === 'string' ? editing.remindInput : '',
+                    'aria-label': t('提醒时间', 'Reminder time'),
+                    onChange: function (event) {
+                      props.onChangeEdit(Object.assign({}, editing, {
+                        remindInput: event.target.value,
+                        remindTouched: true,
+                      }))
+                    },
+                  }),
+                  (typeof editing.remindInput === 'string' && editing.remindInput.length > 0)
+                    ? h('button', {
+                        type: 'button',
+                        className: 'nw-mini',
+                        onClick: function () {
+                          props.onChangeEdit(Object.assign({}, editing, { remindInput: '', remindTouched: true }))
+                        },
+                      }, t('清除提醒', 'Clear reminder'))
+                    : null,
+                )
+              : null,
             attachedPreview
               ? h('div', { className: 'nw-edit-image' },
                   h('img', { src: attachedPreview, alt: '', draggable: false }),
@@ -931,6 +1475,12 @@ window.__ModuleLoader__.load({
           )
         : h('div', { className: 'nw-note-body' },
             note.tag ? h('div', { className: 'nw-note-tag' }, note.tag) : null,
+            folderLabel
+              ? h('div', { className: 'nw-note-folder', title: folderLabel },
+                  h(FolderGlyph, { size: 11 }),
+                  h('span', null, folderLabel),
+                )
+              : null,
             h('p', { className: 'nw-note-text' }, note.text),
             note.link
               ? h('a', {
@@ -944,9 +1494,45 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'nw-note-link-text' }, shortenUrl(note.link)),
                 )
               : null,
+            reminderIso.length > 0
+              ? h('div', {
+                  className: 'nw-note-remind' + (reminderDue ? ' nw-note-remind-due' : ''),
+                  title: formatAbsolute(reminderIso, props.locale),
+                },
+                  h(ClockGlyph, { size: 12 }),
+                  h('span', null,
+                    formatReminderTime(reminderIso, props.locale)
+                      + (reminderDue ? t(' · 已到期', ' · due') : ''),
+                  ),
+                )
+              : null,
           )
 
       const image = editing === null && note.image ? imageUrl(note.image) : ''
+      let imageNode = null
+      if (image) {
+        if (imageDisplay === 'large') {
+          imageNode = h('a', {
+            className: 'nw-note-image',
+            href: image,
+            target: '_blank',
+            rel: 'noreferrer noopener',
+            title: t('打开大图', 'Open full image'),
+            'aria-label': t('打开便签大图', 'Open note image'),
+          }, h('img', { src: image, alt: t('便签图片', 'Note image'), loading: 'lazy', draggable: false }))
+        } else {
+          const size = imageDisplay === 'icon' ? 32 : 96
+          imageNode = h('a', {
+            className: 'nw-note-thumb' + (imageDisplay === 'icon' ? ' nw-note-thumb-icon' : ''),
+            href: image,
+            target: '_blank',
+            rel: 'noreferrer noopener',
+            title: t('打开大图', 'Open full image'),
+            'aria-label': t('打开便签大图', 'Open note image'),
+            style: { width: size, height: size },
+          }, h('img', { src: image, alt: t('便签图片', 'Note image'), loading: 'lazy', draggable: false }))
+        }
+      }
 
       let actions
       if (editing !== null) {
@@ -1024,23 +1610,494 @@ window.__ModuleLoader__.load({
           }
         },
       },
-        image
-          ? h('a', {
-              className: 'nw-note-thumb',
-              href: image,
-              target: '_blank',
-              rel: 'noreferrer noopener',
-              title: t('打开大图', 'Open full image'),
-              'aria-label': t('打开便签大图', 'Open note image'),
-              style: { width: 96, height: 96 },
-            }, h('img', { src: image, alt: t('便签图片', 'Note image'), loading: 'lazy', draggable: false }))
+        selectable
+          ? h('label', { className: 'nw-note-select' },
+              h('input', {
+                type: 'checkbox',
+                className: 'nw-select-check',
+                checked: props.selected === true,
+                disabled: busy,
+                'aria-label': t('选择便签', 'Select note'),
+                onChange: function () { props.onToggleSelect(note) },
+              }),
+              h('span', null, t('选择', 'Select')),
+            )
           : null,
+        imageNode,
         editor,
         h('footer', { className: 'nw-note-foot' },
           h('span', { className: 'nw-note-time', title: formatAbsolute(note.createdAt, props.locale) },
             formatRelative(note.createdAt, props.now, t, props.locale) + (edited ? t(' · 已编辑', ' · edited') : ''),
           ),
           h('div', { className: 'nw-note-actions' }, actions),
+        ),
+      )
+    }
+
+    function notificationPermissionLabel(t) {
+      switch (notificationPermissionState()) {
+        case 'granted':
+          return t('浏览器通知已允许。', 'Browser notifications are allowed.')
+        case 'denied':
+          return t('浏览器通知已被拒绝，需要在浏览器设置里恢复。', 'Browser notifications are blocked; allow them in the browser settings.')
+        case 'unsupported':
+          return t('当前环境不支持浏览器通知。', 'This shell does not support browser notifications.')
+        default:
+          return t('保存开启通知的设置时会请求权限，不会自动弹窗。', 'Permission is requested when you save with notifications on; nothing is requested automatically.')
+      }
+    }
+
+    /**
+     * The note-wall settings surface. It deliberately stays inside the note
+     * wall page (not the Harness settings slot): this batch only persists Host
+     * settings and every control starts from the values the Host reported.
+     */
+    function SettingsPanel(props) {
+      const settings = props.settings
+      const t = props.t
+      const [draft, setDraft] = React.useState(function () { return cloneSettingsDocument(settings) })
+      const busy = props.busy === true
+
+      React.useEffect(function () {
+        setDraft(cloneSettingsDocument(settings))
+      }, [settings])
+
+      function patchGroup(group, field, value) {
+        setDraft(function (current) {
+          const next = cloneSettingsDocument(current)
+          next[group][field] = value
+          return next
+        })
+      }
+
+      function patchField(field, value) {
+        setDraft(function (current) {
+          const next = cloneSettingsDocument(current)
+          next[field] = value
+          return next
+        })
+      }
+
+      function submit(event) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        if (busy) return
+        props.onSave(settingsPatch(settings, draft))
+      }
+
+      function row(label, checked, onChange, disabled) {
+        return h('label', { className: 'nw-set-row' },
+          h('input', {
+            type: 'checkbox',
+            checked: checked === true,
+            disabled: disabled === true || busy,
+            onChange: function (event) { onChange(event.target.checked) },
+          }),
+          h('span', null, label),
+        )
+      }
+
+      const categoryLimits = [4, 8, 12]
+      if (categoryLimits.indexOf(draft.categoryHistory.limit) < 0) categoryLimits.push(draft.categoryHistory.limit)
+      categoryLimits.sort(function (left, right) { return left - right })
+
+      const imageOptions = [
+        { value: 'thumbnail', label: t('缩略图', 'Thumbnail') },
+        { value: 'icon', label: t('图标', 'Icon') },
+        { value: 'large', label: t('大图', 'Large') },
+      ]
+
+      const alarmModeOptions = [
+        { value: 'overlay', label: t('浮层卡片', 'Floating card') },
+        { value: 'banner', label: t('顶部横幅', 'Top banner') },
+        { value: 'silent', label: t('仅数据', 'Data only') },
+      ]
+
+      return h('div', {
+        className: 'nw-settings-backdrop',
+        onMouseDown: function (event) {
+          if (event.target === event.currentTarget) props.onClose()
+        },
+      },
+        h('div', {
+          id: SETTINGS_PANEL_ID,
+          className: 'nw-settings',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': t('便签墙设置', 'Note wall settings'),
+        },
+          h('div', { className: 'nw-settings-head' },
+            h('h3', { className: 'nw-settings-title' }, t('便签墙设置', 'Note wall settings')),
+            h('button', {
+              type: 'button',
+              className: 'nw-iconbtn',
+              'aria-label': t('关闭设置', 'Close settings'),
+              title: t('关闭设置', 'Close settings'),
+              ref: props.closeButtonRef,
+              onClick: props.onClose,
+            }, h(CloseGlyph, { size: 14 })),
+          ),
+          props.error
+            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
+                h('span', { className: 'nw-banner-text' }, props.error),
+              )
+            : null,
+          props.notice
+            ? h('div', { className: 'nw-banner nw-banner-success', role: 'status' },
+                h('span', { className: 'nw-banner-text' }, props.notice),
+              )
+            : null,
+          h('div', { className: 'nw-settings-body' },
+            h('div', { className: 'nw-set-section' },
+              h('div', { className: 'nw-set-section-title' }, t('分类历史', 'Category history')),
+              row(t('显示最近使用的分类', 'Show recently used categories'), draft.categoryHistory.enabled,
+                function (value) { patchGroup('categoryHistory', 'enabled', value) }),
+              h('div', { className: 'nw-set-inline' },
+                h('span', null, t('保留数量', 'Keep')),
+                h('select', {
+                  value: String(draft.categoryHistory.limit),
+                  disabled: busy || !draft.categoryHistory.enabled,
+                  'aria-label': t('保留分类数量', 'Category history size'),
+                  onChange: function (event) {
+                    patchGroup('categoryHistory', 'limit', Number(event.target.value))
+                  },
+                }, categoryLimits.map(function (limit) {
+                  return h('option', { key: limit, value: String(limit) }, String(limit) + ' ' + t('个', 'tags'))
+                })),
+              ),
+              h('p', { className: 'nw-set-hint' }, t('只记录在本机浏览器里，不参与便签数据。', 'Stored only in this browser; it never touches note data.')),
+            ),
+
+            h('div', { className: 'nw-set-section' },
+              h('div', { className: 'nw-set-section-title' }, t('文件夹', 'Folders')),
+              row(t('启用文件夹', 'Enable folders'), draft.folders.enabled,
+                function (value) { patchGroup('folders', 'enabled', value) }),
+              h('p', { className: 'nw-set-hint' }, t('关闭后只隐藏文件夹界面，已保存的分组不会删除。', 'Turning this off only hides the folder UI; saved assignments are kept.')),
+            ),
+
+            h('div', { className: 'nw-set-section' },
+              h('div', { className: 'nw-set-section-title' }, t('卡片图片', 'Card image')),
+              h('div', { className: 'nw-set-inline' },
+                h('span', null, t('显示方式', 'Display')),
+                h('select', {
+                  value: draft.imageDisplay,
+                  disabled: busy,
+                  'aria-label': t('卡片图片显示方式', 'Card image display'),
+                  onChange: function (event) { patchField('imageDisplay', event.target.value) },
+                }, imageOptions.map(function (option) {
+                  return h('option', { key: option.value, value: option.value }, option.label)
+                })),
+              ),
+            ),
+
+            h('div', { className: 'nw-set-section' },
+              h('div', { className: 'nw-set-section-title' }, t('提醒', 'Reminders')),
+              row(t('启用提醒', 'Enable reminders'), draft.reminders.enabled,
+                function (value) { patchGroup('reminders', 'enabled', value) }),
+              row(t('提醒声音', 'Reminder sound'), draft.reminders.sound,
+                function (value) { patchGroup('reminders', 'sound', value) }, !draft.reminders.enabled),
+              h('div', { className: 'nw-set-inline' },
+                h('span', null, t('音量', 'Volume')),
+                h('input', {
+                  type: 'range',
+                  className: 'nw-set-range',
+                  min: 0,
+                  max: 1,
+                  step: 0.05,
+                  value: draft.reminders.volume,
+                  disabled: busy || !draft.reminders.enabled || !draft.reminders.sound,
+                  'aria-label': t('提醒音量', 'Reminder volume'),
+                  onChange: function (event) {
+                    patchGroup('reminders', 'volume', Number(event.target.value))
+                  },
+                }),
+                h('span', { className: 'nw-set-val' }, Math.round(draft.reminders.volume * 100) + '%'),
+              ),
+              row(t('浏览器通知', 'Browser notifications'), draft.reminders.notifications,
+                function (value) { patchGroup('reminders', 'notifications', value) }, !draft.reminders.enabled),
+              h('p', { className: 'nw-set-hint' }, notificationPermissionLabel(t)),
+              row(t('打开页面时补发已逾期提醒', 'Catch up overdue reminders on load'), draft.reminders.overdue,
+                function (value) { patchGroup('reminders', 'overdue', value) }, !draft.reminders.enabled),
+            ),
+
+            h('div', { className: 'nw-set-section' },
+              h('div', { className: 'nw-set-section-title' }, t('主界面 / 全局提醒', 'Main surface / global alarm')),
+              row(t('在 Harness 主界面显示提醒', 'Show reminders over the Harness shell'), draft.globalAlarm.enabled,
+                function (value) { patchGroup('globalAlarm', 'enabled', value) }),
+              h('div', { className: 'nw-set-inline' },
+                h('span', null, t('展示方式', 'Presentation')),
+                h('select', {
+                  value: draft.globalAlarm.mode,
+                  disabled: busy || !draft.globalAlarm.enabled,
+                  'aria-label': t('全局提醒展示方式', 'Global alarm presentation'),
+                  onChange: function (event) { patchGroup('globalAlarm', 'mode', event.target.value) },
+                }, alarmModeOptions.map(function (option) {
+                  return h('option', { key: option.value, value: option.value }, option.label)
+                })),
+              ),
+              h('p', { className: 'nw-set-hint' }, t('浮层/横幅出现在 Harness 界面角落；「仅数据」不显示、不响铃、不通知。', 'Overlay/banner appears over the Harness shell; "Data only" shows, rings and notifies nothing.')),
+            ),
+
+            h('div', { className: 'nw-set-section' },
+              h('div', { className: 'nw-set-section-title' }, t('AI 写入', 'Agent writes')),
+              row(t('允许 AI 工具向便签墙写入', 'Allow agent tools to add notes'), draft.agentWrite.enabled,
+                function (value) { patchGroup('agentWrite', 'enabled', value) }),
+              h('p', { className: 'nw-set-hint' }, t('关闭时 note_wall_add 会被 Harness 端拒绝。', 'When off, the Host rejects note_wall_add.')),
+            ),
+
+            h('div', { className: 'nw-set-section' },
+              h('div', { className: 'nw-set-section-title' }, t('动效', 'Motion')),
+              row(t('启用界面动效', 'Enable interface motion'), draft.motion,
+                function (value) { patchField('motion', value) }),
+            ),
+          ),
+          h('div', { className: 'nw-set-foot' },
+            h('button', {
+              type: 'button',
+              className: 'nw-mini nw-mini-danger',
+              disabled: busy,
+              onClick: props.onReset,
+            }, t('恢复默认', 'Restore defaults')),
+            h('div', { className: 'nw-set-foot-actions' },
+              h('button', {
+                type: 'button',
+                className: 'nw-mini',
+                disabled: busy,
+                onClick: props.onClose,
+              }, t('取消', 'Cancel')),
+              h('button', {
+                type: 'button',
+                className: 'nw-mini nw-mini-primary',
+                disabled: busy,
+                onClick: submit,
+              }, busy ? t('保存中…', 'Saving…') : t('保存设置', 'Save settings')),
+            ),
+          ),
+        ),
+      )
+    }
+
+    // ---------------------------------------------------------------------------
+    // shell.overlay reminder surface
+    // ---------------------------------------------------------------------------
+
+    function ReminderOverlay(props) {
+      const t = useText(props && props.ctx)
+      const [settings, setSettings] = React.useState(function () { return settingsCache })
+      const [due, setDue] = React.useState([])
+      const [error, setError] = React.useState('')
+      const tRef = React.useRef(t)
+      const settingsRef = React.useRef(settings)
+      const notifiedRef = React.useRef({})
+      const dismissedRef = React.useRef({})
+      const aliveRef = React.useRef(true)
+      const active = globalAlarmActive(settings)
+
+      React.useEffect(function () {
+        tRef.current = t
+      }, [t])
+
+      React.useEffect(function () {
+        aliveRef.current = true
+        return function () { aliveRef.current = false }
+      }, [])
+
+      function adoptSettings(value) {
+        const next = normalizeClientSettings(value)
+        settingsRef.current = next
+        settingsCache = next
+        setSettings(function (current) {
+          return JSON.stringify(current) === JSON.stringify(next) ? current : next
+        })
+      }
+
+      // Read the Host settings once on mount and follow page-side saves through
+      // the module-level event. Nothing here runs a timer until the alarm is on.
+      React.useEffect(function () {
+        let cancelled = false
+        function onSettingsEvent(event) {
+          if (cancelled) return
+          adoptSettings(event && event.detail)
+        }
+        try {
+          if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener(SETTINGS_EVENT, onSettingsEvent)
+          }
+        } catch (eventError) {
+          // The initial settings read below is still enough to gate everything.
+        }
+        apiCall('settings')
+          .then(function (value) {
+            if (!cancelled) adoptSettings(value && value.settings)
+          })
+          .catch(function () {
+            // An unreadable settings document means "off": never alert silently.
+          })
+        return function () {
+          cancelled = true
+          try {
+            if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+              window.removeEventListener(SETTINGS_EVENT, onSettingsEvent)
+            }
+          } catch (eventError) {}
+        }
+      }, [])
+
+      React.useEffect(function () {
+        if (active) return
+        setDue([])
+        setError('')
+      }, [active])
+
+      React.useEffect(function () {
+        if (!active) return function () {}
+        let cancelled = false
+        const startedAt = Date.now()
+        let timer = null
+
+        async function tick(first) {
+          let stateValue
+          let settingsValue
+          try {
+            const results = await Promise.all([apiCall('state'), apiCall('settings')])
+            stateValue = results[0]
+            settingsValue = results[1] && results[1].settings
+          } catch (requestError) {
+            return
+          }
+          if (cancelled) return
+          if (settingsValue !== undefined) adoptSettings(settingsValue)
+          const current = normalizeClientSettings(settingsValue !== undefined ? settingsValue : settingsRef.current)
+          if (!globalAlarmActive(current)) return
+          const nowMs = Date.now()
+          const notes = stateValue && Array.isArray(stateValue.notes) ? stateValue.notes : []
+          const catchUp = current.reminders.overdue === true
+          const dueNotes = notes.filter(function (note) {
+            if (!isReminderDue(note, nowMs)) return false
+            if (dismissedRef.current[reminderKey(note)] === true) return false
+            if (first && !catchUp) {
+              const dueMs = Date.parse(note.remindAt)
+              return Number.isFinite(dueMs) && dueMs > startedAt
+            }
+            return true
+          })
+          setDue(dueNotes)
+          const fresh = dueNotes.filter(function (note) {
+            return notifiedRef.current[reminderKey(note)] !== true
+          })
+          if (fresh.length === 0) return
+          for (const note of fresh) notifiedRef.current[reminderKey(note)] = true
+          if (shouldPlayReminderSound(current)) playReminderSound(current.reminders.volume)
+          if (shouldNotifyReminder(current)) {
+            for (const note of fresh) showReminderNotification(note, tRef.current)
+          }
+        }
+
+        void tick(true)
+        timer = setInterval(function () { void tick(false) }, REMINDER_INTERVAL_MS)
+        return function () {
+          cancelled = true
+          clearInterval(timer)
+        }
+      }, [active])
+
+      async function completeNote(note) {
+        setError('')
+        try {
+          await apiCall('update', { id: note.id, remindAt: '' })
+          if (!aliveRef.current) return
+          dismissedRef.current[reminderKey(note)] = true
+          setDue(function (current) {
+            return current.filter(function (item) { return item.id !== note.id })
+          })
+          publishNotesChanged()
+        } catch (completeError) {
+          if (aliveRef.current) {
+            setError(t('提醒没能清除，请稍后再试。', 'Could not clear that reminder; try again.'))
+          }
+        }
+      }
+
+      async function completeAll() {
+        const target = due.slice()
+        if (target.length === 0) return
+        setError('')
+        const failed = {}
+        let cleared = 0
+        for (const note of target) {
+          try {
+            await apiCall('update', { id: note.id, remindAt: '' })
+            dismissedRef.current[reminderKey(note)] = true
+            cleared += 1
+          } catch (completeError) {
+            failed[note.id] = true
+          }
+        }
+        if (!aliveRef.current) return
+        if (cleared > 0) publishNotesChanged()
+        setDue(function (current) {
+          return current.filter(function (item) { return failed[item.id] === true })
+        })
+        if (Object.keys(failed).length > 0) {
+          setError(t('有提醒没能清除，请稍后再试。', 'Some reminders could not be cleared; try again.'))
+        }
+      }
+
+      function dismissAll() {
+        for (const note of due) dismissedRef.current[reminderKey(note)] = true
+        setDue([])
+        setError('')
+      }
+
+      if (!active || due.length === 0) return null
+      const banner = settings.globalAlarm.mode === 'banner'
+      return h(React.Fragment, null,
+        h('style', { key: 'reminder-css' }, OVERLAY_CSS),
+        h('div', {
+          key: 'reminder-layer',
+          className: 'nw-ov-layer' + (banner ? ' nw-ov-banner' : ''),
+          role: 'region',
+          'aria-label': t('便签提醒', 'Note reminders'),
+          'aria-live': 'polite',
+        },
+          h('div', { className: 'nw-ov-card' },
+            h('div', { className: 'nw-ov-head' },
+              h('span', { className: 'nw-ov-title' },
+                h(ClockGlyph, { size: 14 }),
+                h('span', null, t('便签提醒', 'Note reminders')),
+                h('span', { className: 'nw-ov-count' }, String(due.length)),
+              ),
+              h('button', {
+                type: 'button',
+                className: 'nw-ov-btn',
+                'aria-label': t('稍后再说', 'Dismiss'),
+                title: t('稍后再说', 'Dismiss'),
+                onClick: dismissAll,
+              }, h(CloseGlyph, { size: 13 })),
+            ),
+            error ? h('p', { className: 'nw-ov-error', role: 'alert' }, error) : null,
+            h('ul', { className: 'nw-ov-list' }, due.map(function (note) {
+              return h('li', { key: reminderKey(note), className: 'nw-ov-item nw-ov-item-due' },
+                h('div', { className: 'nw-ov-item-body' },
+                  h('p', { className: 'nw-ov-item-text' }, note.text),
+                  h('span', { className: 'nw-ov-item-time' }, formatReminderTime(note.remindAt, undefined)),
+                ),
+                h('button', {
+                  type: 'button',
+                  className: 'nw-ov-btn nw-ov-btn-primary',
+                  onClick: function () { void completeNote(note) },
+                }, t('完成', 'Done')),
+              )
+            })),
+            h('div', { className: 'nw-ov-actions' },
+              h('button', { type: 'button', className: 'nw-ov-btn', onClick: dismissAll },
+                t('稍后再说', 'Later')),
+              h('button', {
+                type: 'button',
+                className: 'nw-ov-btn nw-ov-btn-primary',
+                onClick: function () { void completeAll() },
+              }, t('全部完成', 'Complete all')),
+            ),
+          ),
         ),
       )
     }
@@ -1073,6 +2130,30 @@ window.__ModuleLoader__.load({
       const [reloadKey, setReloadKey] = React.useState(0)
       const [now, setNow] = React.useState(function () { return Date.now() })
       const [signatureOpen, setSignatureOpen] = React.useState(false)
+      // `initialSettings` exists so a test can render the page with a feature on
+      // without a Host; the live page always replaces it with the fetched value.
+      const [settings, setSettings] = React.useState(function () {
+        return props.initialSettings === undefined
+          ? normalizeClientSettings(DEFAULT_CLIENT_SETTINGS)
+          : normalizeClientSettings(props.initialSettings)
+      })
+      const [settingsOpen, setSettingsOpen] = React.useState(false)
+      const [settingsBusy, setSettingsBusy] = React.useState(null)
+      const [settingsLoadError, setSettingsLoadError] = React.useState('')
+      const [settingsError, setSettingsError] = React.useState('')
+      const [settingsNotice, setSettingsNotice] = React.useState('')
+      const [folders, setFolders] = React.useState([])
+      const [filterFolder, setFilterFolder] = React.useState('all')
+      const [folderPanelOpen, setFolderPanelOpen] = React.useState(false)
+      const [newFolderName, setNewFolderName] = React.useState('')
+      const [renamingFolderId, setRenamingFolderId] = React.useState('')
+      const [renameFolderValue, setRenameFolderValue] = React.useState('')
+      const [deletingFolderId, setDeletingFolderId] = React.useState('')
+      const [selectionMode, setSelectionMode] = React.useState(false)
+      const [selected, setSelected] = React.useState({})
+      const [selectionFolderId, setSelectionFolderId] = React.useState('')
+      const [draftRemindAt, setDraftRemindAt] = React.useState('')
+      const [categoryHistory, setCategoryHistory] = React.useState(readCategoryHistory)
       const textareaRef = React.useRef(null)
       const fileRef = React.useRef(null)
       const colorInputRef = React.useRef(null)
@@ -1080,6 +2161,9 @@ window.__ModuleLoader__.load({
       const importRef = React.useRef(null)
       const signatureButtonRef = React.useRef(null)
       const signatureCloseRef = React.useRef(null)
+      const settingsButtonRef = React.useRef(null)
+      const settingsCloseRef = React.useRef(null)
+      const settingsWasOpenRef = React.useRef(false)
       const signatureWasOpenRef = React.useRef(false)
       const signatureTapsRef = React.useRef([])
       const aliveRef = React.useRef(true)
@@ -1090,6 +2174,21 @@ window.__ModuleLoader__.load({
       const tRef = React.useRef(t)
       const composePreviewRef = React.useRef('')
       const editPreviewRef = React.useRef('')
+      const settingsRef = React.useRef(DEFAULT_CLIENT_SETTINGS)
+      const motionRef = React.useRef(motion)
+      const toneRef = React.useRef(tone)
+      settingsRef.current = settings
+      motionRef.current = motion
+      toneRef.current = tone
+
+      const foldersEnabled = featureEnabled(settings, 'folders')
+      const remindersEnabled = featureEnabled(settings, 'reminders')
+      const categoryHistoryEnabled = featureEnabled(settings, 'categoryHistory')
+      const folderNames = React.useMemo(function () {
+        const map = {}
+        for (const folder of folders) map[folder.id] = folder.name
+        return map
+      }, [folders])
 
       React.useEffect(function () {
         aliveRef.current = true
@@ -1138,6 +2237,53 @@ window.__ModuleLoader__.load({
         return function () { controller.abort() }
       }, [reloadKey])
 
+      // Settings load in parallel with the notes. A failed read falls back to
+      // the all-off defaults (safe: nothing is scheduled or shown) and leaves a
+      // visible banner instead of silently pretending the features are on.
+      React.useEffect(function () {
+        const controller = new AbortController()
+        apiCall('settings', null, controller.signal)
+          .then(function (value) {
+            if (!aliveRef.current) return
+            const next = normalizeClientSettings(value && value.settings)
+            setSettings(next)
+            setSettingsLoadError('')
+            setMotion(next.motion)
+            writePrefs({ motion: next.motion, tone: toneRef.current })
+            publishSettings(next)
+          })
+          .catch(function (error) {
+            if (error && error.name === 'AbortError') return
+            if (!aliveRef.current) return
+            const fallback = normalizeClientSettings(null)
+            setSettings(fallback)
+            setSettingsLoadError(errorText(tRef.current, error, limitsRef.current))
+          })
+        return function () { controller.abort() }
+      }, [reloadKey])
+
+      // The overlay can clear a reminder while the wall page is open; refresh
+      // the visible notes so the chip disappears without another user action.
+      React.useEffect(function () {
+        function onNotesChanged() {
+          setReloadKey(function (value) { return value + 1 })
+        }
+        try {
+          if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener(NOTES_EVENT, onNotesChanged)
+          }
+        } catch (error) {
+          // Without the event the page still shows the chip until its next action.
+        }
+        return function () {
+          try {
+            if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+              window.removeEventListener(NOTES_EVENT, onNotesChanged)
+            }
+          } catch (error) {}
+        }
+      }, [])
+
       React.useEffect(function () {
         const element = textareaRef.current
         if (element && typeof element.focus === 'function') element.focus()
@@ -1177,6 +2323,71 @@ window.__ModuleLoader__.load({
         return function () { document.removeEventListener('keydown', onSignatureKeyDown) }
       }, [signatureOpen])
 
+      React.useEffect(function () {
+        if (settingsOpen) {
+          settingsWasOpenRef.current = true
+          setSettingsError('')
+          setSettingsNotice('')
+          if (settingsCloseRef.current && typeof settingsCloseRef.current.focus === 'function') {
+            settingsCloseRef.current.focus()
+          }
+          return
+        }
+        if (settingsWasOpenRef.current) {
+          settingsWasOpenRef.current = false
+          if (settingsButtonRef.current && typeof settingsButtonRef.current.focus === 'function') {
+            settingsButtonRef.current.focus()
+          }
+        }
+      }, [settingsOpen])
+
+      React.useEffect(function () {
+        if (!settingsOpen) return function () {}
+        function onSettingsKeyDown(event) {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          setSettingsOpen(false)
+        }
+        document.addEventListener('keydown', onSettingsKeyDown)
+        return function () { document.removeEventListener('keydown', onSettingsKeyDown) }
+      }, [settingsOpen])
+
+      // Turning folders off hides every folder affordance but keeps the data.
+      React.useEffect(function () {
+        if (foldersEnabled) return
+        setFilterFolder('all')
+        setFolderPanelOpen(false)
+        setSelectionMode(false)
+        setSelected({})
+        setDeletingFolderId('')
+        setRenamingFolderId('')
+      }, [foldersEnabled])
+
+      React.useEffect(function () {
+        if (!foldersEnabled) return
+        if (filterFolder === 'all' || filterFolder === '') return
+        if (folders.some(function (folder) { return folder.id === filterFolder })) return
+        setFilterFolder('all')
+      }, [foldersEnabled, filterFolder, folders])
+
+      React.useEffect(function () {
+        if (!foldersEnabled) return
+        if (selectionFolderId === '') return
+        if (folders.some(function (folder) { return folder.id === selectionFolderId })) return
+        setSelectionFolderId('')
+      }, [foldersEnabled, selectionFolderId, folders])
+
+      React.useEffect(function () {
+        if (!categoryHistoryEnabled) return
+        const limit = categoryHistorySize(settings.categoryHistory.limit)
+        setCategoryHistory(function (current) {
+          if (current.length <= limit) return current
+          const next = current.slice(0, limit)
+          writeCategoryHistory(next)
+          return next
+        })
+      }, [categoryHistoryEnabled, settings.categoryHistory.limit])
+
       const tags = React.useMemo(function () {
         const seen = new Set()
         const values = []
@@ -1189,10 +2400,18 @@ window.__ModuleLoader__.load({
       }, [notes])
 
       const visibleNotes = React.useMemo(function () {
-        return filterNotes(notes, { query: query, tone: filterTone, tag: filterTag })
-      }, [notes, query, filterTone, filterTag])
+        return filterNotes(notes, {
+          query: query,
+          tone: filterTone,
+          tag: filterTag,
+          folderId: foldersEnabled ? filterFolder : 'all',
+        })
+      }, [notes, query, filterTone, filterTag, foldersEnabled, filterFolder])
 
-      const activeFilters = query.trim().length > 0 || filterTone !== 'all' || filterTag !== 'all'
+      const activeFilters = query.trim().length > 0
+        || filterTone !== 'all'
+        || filterTag !== 'all'
+        || (foldersEnabled && filterFolder !== 'all')
 
       const exportHref = React.useMemo(function () {
         return 'data:application/json;charset=utf-8,' + encodeURIComponent(serializeNotes(notes))
@@ -1224,11 +2443,14 @@ window.__ModuleLoader__.load({
             maxTagChars: Number(value.limits.maxTagChars) || DEFAULT_LIMITS.maxTagChars,
             maxLinkChars: Number(value.limits.maxLinkChars) || DEFAULT_LIMITS.maxLinkChars,
             maxImageBytes: Number(value.limits.maxImageBytes) || DEFAULT_LIMITS.maxImageBytes,
+            maxFolders: Number(value.limits.maxFolders) || DEFAULT_LIMITS.maxFolders,
+            maxFolderNameChars: Number(value.limits.maxFolderNameChars) || DEFAULT_LIMITS.maxFolderNameChars,
           }
           limitsRef.current = next
           setLimits(next)
         }
         setNotes(value.notes)
+        if (Array.isArray(value.folders)) setFolders(normalizeFolders(value.folders))
         setStatus('ready')
         setLoadError('')
         hasDataRef.current = true
@@ -1262,19 +2484,193 @@ window.__ModuleLoader__.load({
         const normalized = String(next || '').toLowerCase()
         if (!isValidTone(normalized)) return
         setTone(normalized)
-        writePrefs({ motion: motion, tone: normalized })
+        writePrefs({ motion: motionRef.current, tone: normalized })
       }
 
-      function toggleMotion() {
+      function rememberCategory(tag) {
+        if (!featureEnabled(settingsRef.current, 'categoryHistory')) return
+        const value = typeof tag === 'string' ? tag.trim() : ''
+        if (value.length === 0) return
+        const limit = settingsRef.current.categoryHistory.limit
+        setCategoryHistory(function (current) {
+          const next = nextCategoryHistory(current, value, limit)
+          writeCategoryHistory(next)
+          return next
+        })
+      }
+
+      async function saveSettings(patch) {
+        if (settingsBusy !== null) return
+        if (!patch || Object.keys(patch).length === 0) {
+          setSettingsNotice(t('没有需要保存的修改。', 'Nothing to save.'))
+          return
+        }
+        if (patch.reminders && patch.reminders.notifications === true) requestNotificationPermission()
+        setSettingsBusy('save')
+        setSettingsError('')
+        setSettingsNotice('')
+        try {
+          const value = await apiCall('settingsUpdate', patch)
+          if (!aliveRef.current) return
+          const next = normalizeClientSettings(value && value.settings)
+          setSettings(next)
+          setSettingsLoadError('')
+          setMotion(next.motion)
+          writePrefs({ motion: next.motion, tone: toneRef.current })
+          publishSettings(next)
+          setSettingsNotice(t('设置已保存。', 'Settings saved.'))
+        } catch (error) {
+          if (aliveRef.current) setSettingsError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          if (aliveRef.current) setSettingsBusy(null)
+        }
+      }
+
+      async function resetSettings() {
+        if (settingsBusy !== null) return
+        setSettingsBusy('reset')
+        setSettingsError('')
+        setSettingsNotice('')
+        try {
+          const value = await apiCall('settingsReset')
+          if (!aliveRef.current) return
+          const next = normalizeClientSettings(value && value.settings)
+          setSettings(next)
+          setSettingsLoadError('')
+          setMotion(next.motion)
+          writePrefs({ motion: next.motion, tone: toneRef.current })
+          publishSettings(next)
+          setSettingsNotice(t('已恢复默认设置。', 'Defaults restored.'))
+        } catch (error) {
+          if (aliveRef.current) setSettingsError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          if (aliveRef.current) setSettingsBusy(null)
+        }
+      }
+
+      async function toggleMotion() {
+        if (settingsBusy !== null) return
         const next = !motion
-        setMotion(next)
-        writePrefs({ motion: next, tone: tone })
+        setSettingsBusy('motion')
+        try {
+          const value = await apiCall('settingsUpdate', { motion: next })
+          if (!aliveRef.current) return
+          const saved = normalizeClientSettings(value && value.settings)
+          setSettings(saved)
+          setSettingsLoadError('')
+          setMotion(saved.motion)
+          writePrefs({ motion: saved.motion, tone: toneRef.current })
+          publishSettings(saved)
+        } catch (error) {
+          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          if (aliveRef.current) setSettingsBusy(null)
+        }
+      }
+
+      async function addFolder(event) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        const name = newFolderName.trim()
+        if (name.length === 0 || pendingRef.current) return
+        beginPending('folder-add')
+        try {
+          const value = await apiCall('folderAdd', { name: name })
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          accept(value)
+          setNewFolderName('')
+          setNotice(t('已新建文件夹。', 'Folder created.'))
+        } catch (error) {
+          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          endPending()
+        }
+      }
+
+      function beginRenameFolder(folder) {
+        setDeletingFolderId('')
+        setRenamingFolderId(folder.id)
+        setRenameFolderValue(folder.name)
+      }
+
+      async function renameFolder(event) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        const id = renamingFolderId
+        const name = renameFolderValue.trim()
+        if (id.length === 0 || name.length === 0 || pendingRef.current) return
+        beginPending('folder-rename')
+        try {
+          const value = await apiCall('folderRename', { id: id, name: name })
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          accept(value)
+          setRenamingFolderId('')
+          setRenameFolderValue('')
+          setNotice(t('文件夹已重命名。', 'Folder renamed.'))
+        } catch (error) {
+          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          endPending()
+        }
+      }
+
+      async function removeFolder(folder) {
+        if (pendingRef.current) return
+        beginPending('folder-remove')
+        try {
+          const value = await apiCall('folderRemove', { id: folder.id })
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          accept(value)
+          setDeletingFolderId('')
+          if (filterFolder === folder.id) setFilterFolder('all')
+          if (selectionFolderId === folder.id) setSelectionFolderId('')
+          setNotice(t('文件夹已删除，里面的便签回到未分类。', 'Folder deleted; its notes are uncategorized again.'))
+        } catch (error) {
+          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          endPending()
+        }
+      }
+
+      function toggleSelectionMode() {
+        setSelectionMode(function (current) { return !current })
+        setSelected({})
+      }
+
+      function toggleSelected(note) {
+        setSelected(function (current) {
+          const next = Object.assign({}, current)
+          if (next[note.id]) delete next[note.id]
+          else next[note.id] = true
+          return next
+        })
+      }
+
+      async function moveSelected() {
+        const ids = Object.keys(selected)
+        if (ids.length === 0 || pendingRef.current) return
+        beginPending('move')
+        try {
+          const value = await apiCall('moveNotes', { ids: ids, folderId: selectionFolderId })
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          accept(value)
+          setSelected({})
+          setSelectionMode(false)
+          setNotice(t('已移入文件夹。', 'Notes moved.'))
+        } catch (error) {
+          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          endPending()
+        }
       }
 
       function clearFilters() {
         setQuery('')
         setFilterTone('all')
         setFilterTag('all')
+        setFilterFolder('all')
       }
 
       function openImport() {
@@ -1459,6 +2855,15 @@ window.__ModuleLoader__.load({
         if (event && typeof event.preventDefault === 'function') event.preventDefault()
         const text = draft.trim()
         if (text.length === 0 || pendingRef.current) return
+        const remindersOn = featureEnabled(settingsRef.current, 'reminders')
+        const remindInput = remindersOn ? draftRemindAt.trim() : ''
+        const remindAt = fromLocalDateTimeInput(remindInput)
+        if (remindInput.length > 0 && remindAt.length === 0) {
+          setActionError(t('提醒时间无法识别。', 'That reminder time is not valid.'))
+          return
+        }
+        if (remindAt.length > 0 && shouldNotifyReminder(settingsRef.current)) requestNotificationPermission()
+        const tag = draftTag.trim()
         beginPending('add')
         let uploadedId = ''
         try {
@@ -1471,17 +2876,20 @@ window.__ModuleLoader__.load({
           }
           const value = await apiCall('add', {
             text: text,
-            tag: draftTag.trim(),
+            tag: tag,
             tone: tone,
             link: draftLink.trim(),
             image: uploadedId,
+            remindAt: remindAt,
           })
           if (!aliveRef.current) return
           loadSeqRef.current += 1
           accept(value)
+          rememberCategory(tag)
           setDraft('')
           setDraftTag('')
           setDraftLink('')
+          setDraftRemindAt('')
           clearComposeAttachment()
           if (textareaRef.current && typeof textareaRef.current.focus === 'function') textareaRef.current.focus()
         } catch (error) {
@@ -1505,6 +2913,9 @@ window.__ModuleLoader__.load({
           imageFile: null,
           imagePreview: '',
           imageTouched: false,
+          remindAt: note.remindAt || '',
+          remindInput: toLocalDateTimeInput(note.remindAt || ''),
+          remindTouched: false,
           baseUpdatedAt: note.updatedAt,
         })
       }
@@ -1538,6 +2949,8 @@ window.__ModuleLoader__.load({
             return Object.assign({}, current, {
               baseUpdatedAt: latest.updatedAt,
               image: current.imageTouched ? current.image : latest.image,
+              remindAt: current.remindTouched ? current.remindAt : (latest.remindAt || ''),
+              remindInput: current.remindTouched ? current.remindInput : toLocalDateTimeInput(latest.remindAt || ''),
             })
           })
           setActionError(t(
@@ -1561,6 +2974,15 @@ window.__ModuleLoader__.load({
           setActionError(t('便签内容不能为空。', 'A note cannot be empty.'))
           return
         }
+        const remindersOn = featureEnabled(settingsRef.current, 'reminders')
+        const remindInput = remindersOn && typeof editing.remindInput === 'string' ? editing.remindInput.trim() : ''
+        const remindAt = remindersOn ? fromLocalDateTimeInput(remindInput) : (editing.remindAt || '')
+        if (remindersOn && remindInput.length > 0 && remindAt.length === 0) {
+          setActionError(t('提醒时间无法识别。', 'That reminder time is not valid.'))
+          return
+        }
+        if (remindAt.length > 0 && shouldNotifyReminder(settingsRef.current)) requestNotificationPermission()
+        const savedTag = editing.tag.trim()
         beginPending('save')
         let uploadedId = ''
         try {
@@ -1576,15 +2998,17 @@ window.__ModuleLoader__.load({
           const value = await apiCall('update', {
             id: editing.id,
             text: text,
-            tag: editing.tag.trim(),
+            tag: savedTag,
             tone: editing.tone,
             link: editing.link.trim(),
             image: imageId,
+            remindAt: remindAt,
             baseUpdatedAt: editing.baseUpdatedAt,
           })
           if (!aliveRef.current) return
           loadSeqRef.current += 1
           accept(value)
+          rememberCategory(savedTag)
           revokeEditPreview()
           setEditing(null)
         } catch (error) {
@@ -1622,6 +3046,7 @@ window.__ModuleLoader__.load({
       }
 
       const canAdd = draft.trim().length > 0 && pending === null
+      const selectedCount = Object.keys(selected).length
       const countText = notes.length === 0
         ? t('还没有便签', 'No notes yet')
         : activeFilters
@@ -1646,12 +3071,26 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 className: 'nw-motion-toggle' + (motion ? ' nw-motion-on' : ''),
                 'aria-pressed': motion,
+                disabled: settingsBusy !== null,
                 title: t('切换便签动效', 'Toggle note motion'),
                 onClick: toggleMotion,
               },
                 h(SparkleGlyph, { size: 14 }),
                 h('span', null, t('动效', 'Motion')),
                 h('span', { className: 'nw-motion-dot', 'aria-hidden': 'true' }),
+              ),
+              h('button', {
+                type: 'button',
+                className: 'nw-motion-toggle',
+                ref: settingsButtonRef,
+                'aria-haspopup': 'dialog',
+                'aria-expanded': settingsOpen,
+                'aria-controls': SETTINGS_PANEL_ID,
+                title: t('便签墙设置', 'Note wall settings'),
+                onClick: function () { setSettingsOpen(true) },
+              },
+                h(GearGlyph, { size: 14 }),
+                h('span', null, t('设置', 'Settings')),
               ),
             ),
           ),
@@ -1753,6 +3192,27 @@ window.__ModuleLoader__.load({
                   onChange: function (event) { setDraftLink(event.target.value) },
                 }),
               ),
+              remindersEnabled
+                ? h('div', { className: 'nw-remind-field' },
+                    h(ClockGlyph, { size: 13 }),
+                    h('input', {
+                      className: 'nw-remind-input',
+                      type: 'datetime-local',
+                      value: draftRemindAt,
+                      'aria-label': t('提醒时间', 'Reminder time'),
+                      onChange: function (event) { setDraftRemindAt(event.target.value) },
+                    }),
+                    draftRemindAt.length > 0
+                      ? h('button', {
+                          type: 'button',
+                          className: 'nw-iconbtn',
+                          title: t('清除提醒', 'Clear reminder'),
+                          'aria-label': t('清除提醒', 'Clear reminder'),
+                          onClick: function () { setDraftRemindAt('') },
+                        }, h(CloseGlyph, { size: 13 }))
+                      : null,
+                  )
+                : null,
               h('button', {
                 type: 'button',
                 className: 'nw-attach-btn',
@@ -1778,6 +3238,20 @@ window.__ModuleLoader__.load({
                 ),
               ),
             ),
+            categoryHistoryEnabled && categoryHistory.length > 0
+              ? h('div', { className: 'nw-cat-history', role: 'group', 'aria-label': t('最近使用的分类', 'Recent categories') },
+                  h('span', { className: 'nw-cat-label' }, t('最近分类', 'Recent')),
+                  categoryHistory.map(function (tag) {
+                    return h('button', {
+                      key: tag,
+                      type: 'button',
+                      className: 'nw-cat-chip',
+                      title: t('使用分类「' + tag + '」', 'Use category "' + tag + '"'),
+                      onClick: function () { setDraftTag(tag) },
+                    }, tag)
+                  }),
+                )
+              : null,
           ),
           h('div', { className: 'nw-toolbar', key: 'toolbar' },
             h('input', {
@@ -1821,6 +3295,43 @@ window.__ModuleLoader__.load({
                 return h('option', { key: tag, value: tag }, tag)
               }),
             ),
+            foldersEnabled
+              ? h('select', {
+                  className: 'nw-filter',
+                  value: filterFolder,
+                  'aria-label': t('按文件夹筛选', 'Filter by folder'),
+                  onChange: function (event) { setFilterFolder(event.target.value) },
+                },
+                  h('option', { value: 'all' }, t('全部文件夹', 'All folders')),
+                  h('option', { value: '' }, t('未分类', 'Uncategorized')),
+                  folders.map(function (folder) {
+                    return h('option', { key: folder.id, value: folder.id }, folder.name)
+                  }),
+                )
+              : null,
+            foldersEnabled
+              ? h('button', {
+                  type: 'button',
+                  className: 'nw-mini' + (folderPanelOpen ? ' nw-mini-primary' : ''),
+                  'aria-expanded': folderPanelOpen,
+                  'aria-pressed': folderPanelOpen,
+                  title: t('管理文件夹', 'Manage folders'),
+                  onClick: function () {
+                    setFolderPanelOpen(function (current) { return !current })
+                    setDeletingFolderId('')
+                    setRenamingFolderId('')
+                  },
+                }, h(FolderGlyph, { size: 13 }), h('span', null, t('文件夹', 'Folders')))
+              : null,
+            foldersEnabled
+              ? h('button', {
+                  type: 'button',
+                  className: 'nw-mini' + (selectionMode ? ' nw-mini-primary' : ''),
+                  'aria-pressed': selectionMode,
+                  title: t('多选便签并移入文件夹', 'Select notes and move them into a folder'),
+                  onClick: toggleSelectionMode,
+                }, selectionMode ? t('退出选择', 'Done selecting') : t('选择', 'Select'))
+              : null,
             activeFilters
               ? h('button', {
                   type: 'button',
@@ -1833,7 +3344,7 @@ window.__ModuleLoader__.load({
                 className: 'nw-mini nw-export',
                 href: exportHref,
                 download: 'dsh-note-wall-notes.json',
-                title: t('导出便签 JSON（不含图片文件）', 'Export notes as JSON (image files not included)'),
+                title: t('导出便签 JSON（不含图片文件，不是完整备份）', 'Export notes as JSON (image files not included; not a full backup)'),
               }, t('导出 JSON', 'Export JSON')),
               h('button', {
                 type: 'button',
@@ -1850,6 +3361,134 @@ window.__ModuleLoader__.load({
               }),
             ),
           ),
+          foldersEnabled && folderPanelOpen
+            ? h('div', {
+                className: 'nw-folder-panel',
+                role: 'region',
+                'aria-label': t('文件夹管理', 'Folder management'),
+                key: 'folders',
+              },
+                h('form', { className: 'nw-folder-form', onSubmit: addFolder },
+                  h('input', {
+                    className: 'nw-folder-input',
+                    type: 'text',
+                    value: newFolderName,
+                    maxLength: limits.maxFolderNameChars,
+                    disabled: pending !== null,
+                    placeholder: t('新文件夹名称', 'New folder name'),
+                    'aria-label': t('新文件夹名称', 'New folder name'),
+                    onChange: function (event) { setNewFolderName(event.target.value) },
+                  }),
+                  h('button', {
+                    type: 'submit',
+                    className: 'nw-mini nw-mini-primary',
+                    disabled: newFolderName.trim().length === 0 || pending !== null,
+                  }, pending === 'folder-add' ? t('新建中…', 'Creating…') : t('新建', 'Create')),
+                ),
+                folders.length === 0
+                  ? h('div', { className: 'nw-folder-empty' }, t('还没有文件夹。', 'No folders yet.'))
+                  : null,
+                folders.map(function (folder) {
+                  if (renamingFolderId === folder.id) {
+                    return h('form', { key: folder.id, className: 'nw-folder-row', onSubmit: renameFolder },
+                      h('input', {
+                        className: 'nw-folder-input',
+                        type: 'text',
+                        value: renameFolderValue,
+                        maxLength: limits.maxFolderNameChars,
+                        disabled: pending !== null,
+                        'aria-label': t('文件夹名称', 'Folder name'),
+                        onChange: function (event) { setRenameFolderValue(event.target.value) },
+                      }),
+                      h('button', { type: 'submit', className: 'nw-mini nw-mini-primary', disabled: pending !== null },
+                        t('保存', 'Save')),
+                      h('button', {
+                        type: 'button',
+                        className: 'nw-mini',
+                        disabled: pending !== null,
+                        onClick: function () { setRenamingFolderId(''); setRenameFolderValue('') },
+                      }, t('取消', 'Cancel')),
+                    )
+                  }
+                  if (deletingFolderId === folder.id) {
+                    return h('div', { key: folder.id, className: 'nw-folder-row' },
+                      h('span', { className: 'nw-folder-name' }, folder.name),
+                      h('span', { className: 'nw-folder-empty' }, t('删除后便签回到未分类', 'Notes move to Uncategorized')),
+                      h('button', {
+                        type: 'button',
+                        className: 'nw-mini',
+                        disabled: pending !== null,
+                        onClick: function () { setDeletingFolderId('') },
+                      }, t('取消', 'Cancel')),
+                      h('button', {
+                        type: 'button',
+                        className: 'nw-mini nw-mini-danger',
+                        disabled: pending !== null,
+                        onClick: function () { void removeFolder(folder) },
+                      }, pending === 'folder-remove' ? t('删除中…', 'Deleting…') : t('确认删除', 'Confirm delete')),
+                    )
+                  }
+                  return h('div', { key: folder.id, className: 'nw-folder-row' },
+                    h('span', { className: 'nw-folder-name', title: folder.name }, folder.name),
+                    h('button', {
+                      type: 'button',
+                      className: 'nw-mini',
+                      disabled: pending !== null,
+                      onClick: function () { beginRenameFolder(folder) },
+                    }, t('重命名', 'Rename')),
+                    h('button', {
+                      type: 'button',
+                      className: 'nw-mini nw-mini-danger',
+                      disabled: pending !== null,
+                      onClick: function () {
+                        setRenamingFolderId('')
+                        setDeletingFolderId(folder.id)
+                      },
+                    }, t('删除', 'Delete')),
+                  )
+                }),
+              )
+            : null,
+          foldersEnabled && selectionMode
+            ? h('div', {
+                className: 'nw-select-bar',
+                role: 'region',
+                'aria-label': t('批量移动到文件夹', 'Move notes to a folder'),
+                key: 'selection',
+              },
+                h('span', null, t('已选 ' + selectedCount + ' 条', selectedCount + ' selected')),
+                h('select', {
+                  value: selectionFolderId,
+                  disabled: pending !== null,
+                  'aria-label': t('目标文件夹', 'Target folder'),
+                  onChange: function (event) { setSelectionFolderId(event.target.value) },
+                },
+                  h('option', { value: '' }, t('未分类', 'Uncategorized')),
+                  folders.map(function (folder) {
+                    return h('option', { key: folder.id, value: folder.id }, folder.name)
+                  }),
+                ),
+                h('button', {
+                  type: 'button',
+                  className: 'nw-mini nw-mini-primary',
+                  disabled: selectedCount === 0 || pending !== null,
+                  onClick: moveSelected,
+                }, pending === 'move' ? t('移入中…', 'Moving…') : t('移入', 'Move')),
+              )
+            : null,
+          settingsLoadError
+            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert', key: 'settings-load-error' },
+                h('span', { className: 'nw-banner-text' },
+                  t('设置读取失败，已使用默认设置（新功能全部关闭）：', 'Could not read settings; using defaults (new features off): ')
+                    + settingsLoadError,
+                ),
+                h('button', {
+                  type: 'button',
+                  className: 'nw-mini',
+                  onClick: function () { setReloadKey(function (value) { return value + 1 }) },
+                }, t('重试', 'Retry')),
+              )
+            : null,
           actionError
             ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert', key: 'action-error' },
                 h('span', { className: 'nw-banner-text' }, actionError),
@@ -1911,6 +3550,12 @@ window.__ModuleLoader__.load({
                     pending: pending,
                     editing: editing !== null && editing.id === note.id ? editing : null,
                     confirming: confirming === note.id,
+                    imageDisplay: settings.imageDisplay,
+                    remindersEnabled: remindersEnabled,
+                    folderName: foldersEnabled && note.folderId ? (folderNames[note.folderId] || '') : '',
+                    selectable: foldersEnabled && selectionMode,
+                    selected: selected[note.id] === true,
+                    onToggleSelect: toggleSelected,
                     onChangeEdit: setEditing,
                     onBeginEdit: beginEdit,
                     onCancelEdit: cancelEdit,
@@ -1960,6 +3605,20 @@ window.__ModuleLoader__.load({
                 : null,
             ),
           ),
+          settingsOpen
+            ? h(SettingsPanel, {
+                key: 'settings',
+                settings: settings,
+                t: t,
+                busy: settingsBusy !== null,
+                error: settingsError,
+                notice: settingsNotice,
+                closeButtonRef: settingsCloseRef,
+                onSave: saveSettings,
+                onReset: resetSettings,
+                onClose: function () { setSettingsOpen(false) },
+              })
+            : null,
         ),
       )
     }
@@ -1994,6 +3653,20 @@ window.__ModuleLoader__.load({
           key: 'note-wall',
         }, function NoteWallMain(props) {
           return h(NoteWallPage, Object.assign({}, props, { ctx: ctx }))
+        })
+      })
+
+      // v1.2.0 reminder surface: the host's `shell.overlay` slot, never
+      // document.body/head. The component itself returns null unless the user
+      // enabled reminders AND the global alarm, so a disabled install renders
+      // no content and runs no timer.
+      ctx.slots.inject('shell.overlay', function () {
+        return ctx.slots.register({
+          name: 'shell.overlay',
+          id: REMINDER_OVERLAY_ID,
+          order: 500,
+        }, function NoteWallReminderOverlay() {
+          return h(ReminderOverlay, { ctx: ctx })
         })
       })
     }
