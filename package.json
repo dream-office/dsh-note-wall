@@ -17,7 +17,7 @@
   },
   "scripts": {
     "check": "node --check index.js && node --check client.js && node --check lib/store.js && node --check lib/images.js",
-    "test": "node test/store.test.mjs && node test/route.test.mjs && node test/signature.test.mjs"
+    "test": "node test/store.test.mjs && node test/route.test.mjs && node test/signature.test.mjs && node test/tool.test.mjs && node test/ui.test.mjs"
   },
   "type": "module",
   "main": "index.js",

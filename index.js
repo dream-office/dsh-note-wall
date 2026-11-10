@@ -136,7 +136,7 @@ function trustedRequest(ctx) {
   }
 }
 
-export const inject = ['webServer']
+export const inject = ['webServer', 'tools']
 
 export function apply(ctx) {
   const logger = ctx.logger ?? console
@@ -345,6 +345,42 @@ export function apply(ctx) {
   ctx.effect(
     () => ctx.webServer.register({ kind: 'prefix', path: IMAGE_UPLOAD_PATH, handler: imageHandler }),
     'note-wall: image read route',
+  )
+
+  // Host-side tool: lets the agent add a note without going through the page.
+  // v1.2.0 deliberately excludes images (upload stays a UI action).
+  ctx.effect(
+    () => ctx.tools.register({
+      name: 'note_wall_add',
+      description: 'Add a sticky note to the Note wall. Use it for quick ideas or reminders; text is required. category is the note tag, color accepts the preset names (amber/peach/sky/mint/lilac/cream) or a #RRGGBB value, and link must be http(s). Images are not supported by this tool.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', description: 'Note body, 1-500 characters.' },
+          category: { type: 'string', description: 'Optional category/tag, up to 24 characters.' },
+          color: { type: 'string', description: 'Optional note color: amber, peach, sky, mint, lilac, cream, or #RRGGBB.' },
+          link: { type: 'string', description: 'Optional http/https link, up to 2048 characters.' },
+        },
+        required: ['text'],
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: `Added to the note wall: ${value.note.text}` }],
+      },
+      async execute(args) {
+        await ensureStore()
+        const payload = args !== null && typeof args === 'object' ? args : {}
+        const note = await store.add({
+          text: payload.text,
+          tag: payload.category,
+          tone: payload.color,
+          link: payload.link,
+        })
+        return { note }
+      },
+    }),
+    'note-wall: note_wall_add tool',
   )
 
   ctx.effect(

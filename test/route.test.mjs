@@ -24,6 +24,7 @@ async function setup(options = {}) {
   process.env.DSH_HOME = home
   const routes = []
   const effects = []
+  const tools = []
   const ctx = {
     logger: quietLogger,
     get(name) {
@@ -33,6 +34,12 @@ async function setup(options = {}) {
       register(route) {
         routes.push(route)
         return () => { routes.length = 0 }
+      },
+    },
+    tools: {
+      register(definition) {
+        tools.push(definition)
+        return () => {}
       },
     },
     effect(effect) {

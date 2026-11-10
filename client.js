@@ -98,6 +98,120 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ---------------------------------------------------------------------------
+    // Pure note helpers (search/filter/import/export; tested through the hook)
+    // ---------------------------------------------------------------------------
+
+    function normalizeQuery(value) {
+      return typeof value === 'string' ? value.trim().toLowerCase() : ''
+    }
+
+    function noteMatchesQuery(note, query) {
+      const term = normalizeQuery(query)
+      if (term.length === 0) return true
+      const haystack = [note && note.text, note && note.tag, note && note.link]
+        .filter(function (value) { return typeof value === 'string' })
+        .join('\n')
+        .toLowerCase()
+      return haystack.indexOf(term) >= 0
+    }
+
+    function noteMatchesFilter(note, filters) {
+      const options = filters || {}
+      if (!noteMatchesQuery(note, options.query)) return false
+      if (options.tone && options.tone !== 'all') {
+        if (options.tone === 'custom') {
+          if (!isCustomTone(note && note.tone)) return false
+        } else if (!note || note.tone !== options.tone) {
+          return false
+        }
+      }
+      if (options.tag && options.tag !== 'all' && (!note || note.tag !== options.tag)) return false
+      return true
+    }
+
+    function filterNotes(notes, filters) {
+      return (Array.isArray(notes) ? notes : []).filter(function (note) {
+        return noteMatchesFilter(note, filters)
+      })
+    }
+
+    function isImportableLink(link, maxChars) {
+      if (Array.from(link).length > maxChars) return false
+      try {
+        const url = new URL(link)
+        return url.protocol === 'http:' || url.protocol === 'https:'
+      } catch (error) {
+        return false
+      }
+    }
+
+    function serializeNotes(notes) {
+      const list = (Array.isArray(notes) ? notes : []).map(function (note) {
+        return {
+          text: typeof note.text === 'string' ? note.text : '',
+          tag: typeof note.tag === 'string' ? note.tag : '',
+          tone: typeof note.tone === 'string' ? note.tone : DEFAULT_TONE,
+          link: typeof note.link === 'string' ? note.link : '',
+        }
+      })
+      return JSON.stringify({
+        app: 'dsh-note-wall',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        notes: list,
+      }, null, 2)
+    }
+
+    function parseImportPayload(raw, limits) {
+      const caps = limits || DEFAULT_LIMITS
+      let parsed
+      try {
+        parsed = JSON.parse(String(raw || ''))
+      } catch (error) {
+        throw Object.assign(new Error('import-json'), { code: 'import-json' })
+      }
+      const list = Array.isArray(parsed)
+        ? parsed
+        : parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.notes)
+          ? parsed.notes
+          : undefined
+      if (list === undefined) throw Object.assign(new Error('import-shape'), { code: 'import-shape' })
+      const notes = []
+      let skipped = 0
+      for (const item of list) {
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          skipped += 1
+          continue
+        }
+        const text = typeof item.text === 'string' ? item.text.trim() : ''
+        if (text.length === 0 || Array.from(text).length > caps.maxNoteChars) {
+          skipped += 1
+          continue
+        }
+        const tag = typeof item.tag === 'string' ? item.tag.trim() : ''
+        if (Array.from(tag).length > caps.maxTagChars) {
+          skipped += 1
+          continue
+        }
+        const link = typeof item.link === 'string' ? item.link.trim() : ''
+        if (link.length > 0 && !isImportableLink(link, caps.maxLinkChars)) {
+          skipped += 1
+          continue
+        }
+        let tone = DEFAULT_TONE
+        if (item.tone !== undefined && item.tone !== null && item.tone !== '') {
+          if (typeof item.tone !== 'string' || !isValidTone(item.tone)) {
+            skipped += 1
+            continue
+          }
+          tone = item.tone.toLowerCase()
+        }
+        notes.push({ text: text, tag: tag, tone: tone, link: link })
+      }
+      return { notes: notes, skipped: skipped }
+    }
+
     /**
      * Pure three-tap tracker for the footer signature. Keeps only the taps that
      * are still inside the window; the third tap inside it opens the note and
@@ -134,6 +248,11 @@ window.__ModuleLoader__.load({
       window.__DSH_NOTE_WALL_TEST__.signatureTap = signatureTap
       window.__DSH_NOTE_WALL_TEST__.signatureWindowMs = SIGNATURE_CLICK_WINDOW_MS
       window.__DSH_NOTE_WALL_TEST__.signatureConsoleText = SIGNATURE_CONSOLE_TEXT
+      window.__DSH_NOTE_WALL_TEST__.filterNotes = filterNotes
+      window.__DSH_NOTE_WALL_TEST__.serializeNotes = serializeNotes
+      window.__DSH_NOTE_WALL_TEST__.parseImportPayload = parseImportPayload
+      window.__DSH_NOTE_WALL_TEST__.DEFAULT_LIMITS = DEFAULT_LIMITS
+      window.__DSH_NOTE_WALL_TEST__.NoteCard = NoteCard
     }
 
     // ---------------------------------------------------------------------------
@@ -359,6 +478,8 @@ window.__ModuleLoader__.load({
         'image-type-invalid': t('只支持 PNG、JPEG、WebP、GIF 图片。', 'Only PNG, JPEG, WebP and GIF images are supported.'),
         'image-empty': t('图片内容为空。', 'The image is empty.'),
         'image-write-failed': t('图片保存失败，请查看 Harness 日志。', 'Saving the image failed; check the Harness log.'),
+        'import-json': t('JSON 格式不正确。', 'That JSON is not valid.'),
+        'import-shape': t('JSON 里没有 notes 数组。', 'The JSON has no notes array.'),
         'store-unavailable': t('便签存储暂时不可用，请查看 Harness 日志。', 'Note storage is unavailable; check the Harness log.'),
         'store-corrupt-unreadable': t('便签存储损坏且无法保留原文件，读写已停止。', 'Note storage is damaged and could not be preserved; reads and writes are stopped.'),
         'internal': t('便签保存失败，请查看 Harness 日志。', 'Saving the note failed; check the Harness log.'),
@@ -491,6 +612,15 @@ window.__ModuleLoader__.load({
 .nw-motion-toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .nw-motion-dot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-border-l2)}
 .nw-motion-on .nw-motion-dot{background:var(--dsw-alias-brand-primary)}
+.nw-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.nw-search{flex:1 1 220px;min-width:150px;height:32px;box-sizing:border-box;padding:0 10px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px}
+.nw-search::placeholder{color:color-mix(in srgb,var(--dsw-alias-label-primary) 66%,transparent);opacity:1}
+.nw-search:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-filter{height:32px;padding:0 8px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;cursor:pointer}
+.nw-filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-toolbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.nw-export{display:inline-flex;align-items:center;text-decoration:none}
+.nw-banner-success{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
 
 .nw-tone-amber{--nw-accent:#F0C24B}
 .nw-tone-peach{--nw-accent:#F2A6BC}
@@ -552,15 +682,16 @@ window.__ModuleLoader__.load({
 .nw-add:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 
 .nw-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));align-items:start}
-.nw-note{display:flex;flex-direction:column;gap:10px;min-height:182px;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 42%,var(--dsw-alias-bg-layer-1));box-sizing:border-box}
+.nw-note{display:flex;flex-direction:column;gap:10px;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 42%,var(--dsw-alias-bg-layer-1));box-sizing:border-box}
 .nw-note:hover{border-color:var(--dsw-alias-border-l2)}
 .nw-note-editing:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .nw-note-body{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0}
 .nw-note-tag{font-size:12px;font-weight:600;letter-spacing:.04em;color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent)}
 .nw-note-text{margin:0;font-size:16px;line-height:1.72;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary)}
-.nw-note-image{display:block;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);margin:0 0 2px;background:var(--dsw-alias-bg-layer-2)}
-.nw-note-image img{display:block;width:100%;max-height:190px;object-fit:cover}
-.nw-note-image:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-note-thumb{display:block;width:96px;height:96px;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);flex:none}
+.nw-note-thumb img{display:block;width:100%;height:100%;object-fit:cover}
+.nw-note-thumb:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-note:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .nw-note-link{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0;font-size:12px;color:var(--dsw-alias-link);text-decoration:none;padding:2px 0}
 .nw-note-link:hover{text-decoration:underline}
 .nw-note-link:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}
@@ -574,8 +705,8 @@ window.__ModuleLoader__.load({
 .nw-edit-link{width:100%;box-sizing:border-box;height:26px;padding:0;border:none;border-bottom:.5px solid var(--dsw-alias-border-l2);background:transparent;font-family:inherit;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .nw-edit-link::placeholder{color:var(--dsw-alias-label-tertiary);opacity:1}
 .nw-edit-link:focus-visible{outline:none;border-bottom-color:var(--dsw-alias-brand-primary)}
-.nw-edit-image{display:flex;align-items:center;gap:8px;padding:6px;border-radius:10px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
-.nw-edit-image img{width:52px;height:52px;border-radius:8px;object-fit:cover;flex:none;background:var(--dsw-alias-bg-layer-2)}
+.nw-edit-image{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:6px;border-radius:10px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
+.nw-edit-image img{display:block;width:100%;max-height:180px;height:auto;object-fit:contain;border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
 .nw-edit-image-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .nw-edit-palette{display:flex;align-items:center;gap:4px;padding-top:2px}
 .nw-note-foot{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 72%,transparent)}
@@ -878,6 +1009,8 @@ window.__ModuleLoader__.load({
       return h('article', {
         className: 'nw-note' + toneClass(tone) + (editing !== null ? ' nw-note-editing' : ''),
         style: toneStyle(tone),
+        tabIndex: 0,
+        'aria-label': t('便签：', 'Note: ') + (note.tag ? note.tag + ' · ' : '') + note.text,
         onKeyDown: function (event) {
           if (event.key !== 'Escape') return
           if (editing !== null) {
@@ -893,11 +1026,13 @@ window.__ModuleLoader__.load({
       },
         image
           ? h('a', {
-              className: 'nw-note-image',
+              className: 'nw-note-thumb',
               href: image,
               target: '_blank',
               rel: 'noreferrer noopener',
-              title: t('打开图片', 'Open image'),
+              title: t('打开大图', 'Open full image'),
+              'aria-label': t('打开便签大图', 'Open note image'),
+              style: { width: 96, height: 96 },
             }, h('img', { src: image, alt: t('便签图片', 'Note image'), loading: 'lazy', draggable: false }))
           : null,
         editor,
@@ -925,6 +1060,10 @@ window.__ModuleLoader__.load({
       const [draftLink, setDraftLink] = React.useState('')
       const [tone, setTone] = React.useState(function () { return readPrefs().tone })
       const [motion, setMotion] = React.useState(function () { return readPrefs().motion })
+      const [query, setQuery] = React.useState('')
+      const [filterTone, setFilterTone] = React.useState('all')
+      const [filterTag, setFilterTag] = React.useState('all')
+      const [notice, setNotice] = React.useState('')
       const [composeFile, setComposeFile] = React.useState(null)
       const [composePreview, setComposePreview] = React.useState('')
       const [dragging, setDragging] = React.useState(false)
@@ -937,6 +1076,8 @@ window.__ModuleLoader__.load({
       const textareaRef = React.useRef(null)
       const fileRef = React.useRef(null)
       const colorInputRef = React.useRef(null)
+      const searchRef = React.useRef(null)
+      const importRef = React.useRef(null)
       const signatureButtonRef = React.useRef(null)
       const signatureCloseRef = React.useRef(null)
       const signatureWasOpenRef = React.useRef(false)
@@ -1036,6 +1177,44 @@ window.__ModuleLoader__.load({
         return function () { document.removeEventListener('keydown', onSignatureKeyDown) }
       }, [signatureOpen])
 
+      const tags = React.useMemo(function () {
+        const seen = new Set()
+        const values = []
+        for (const note of notes) {
+          if (typeof note.tag !== 'string' || note.tag.length === 0 || seen.has(note.tag)) continue
+          seen.add(note.tag)
+          values.push(note.tag)
+        }
+        return values.sort(function (left, right) { return left.localeCompare(right) })
+      }, [notes])
+
+      const visibleNotes = React.useMemo(function () {
+        return filterNotes(notes, { query: query, tone: filterTone, tag: filterTag })
+      }, [notes, query, filterTone, filterTag])
+
+      const activeFilters = query.trim().length > 0 || filterTone !== 'all' || filterTag !== 'all'
+
+      const exportHref = React.useMemo(function () {
+        return 'data:application/json;charset=utf-8,' + encodeURIComponent(serializeNotes(notes))
+      }, [notes])
+
+      React.useEffect(function () {
+        if (filterTag !== 'all' && tags.indexOf(filterTag) < 0) setFilterTag('all')
+      }, [filterTag, tags])
+
+      React.useEffect(function () {
+        function onSearchShortcut(event) {
+          if (event.defaultPrevented) return
+          if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return
+          const target = event.target
+          if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return
+          event.preventDefault()
+          if (searchRef.current && typeof searchRef.current.focus === 'function') searchRef.current.focus()
+        }
+        document.addEventListener('keydown', onSearchShortcut)
+        return function () { document.removeEventListener('keydown', onSearchShortcut) }
+      }, [])
+
       function accept(value) {
         if (!value || !Array.isArray(value.notes)) return
         if (value.limits && typeof value.limits === 'object') {
@@ -1059,6 +1238,7 @@ window.__ModuleLoader__.load({
         pendingRef.current = true
         setPending(kind)
         setActionError('')
+        setNotice('')
       }
 
       function endPending() {
@@ -1089,6 +1269,62 @@ window.__ModuleLoader__.load({
         const next = !motion
         setMotion(next)
         writePrefs({ motion: next, tone: tone })
+      }
+
+      function clearFilters() {
+        setQuery('')
+        setFilterTone('all')
+        setFilterTag('all')
+      }
+
+      function openImport() {
+        if (importRef.current) importRef.current.click()
+      }
+
+      async function onImportFile(event) {
+        const files = event.target.files
+        const file = files && files.length > 0 ? files[0] : null
+        event.target.value = ''
+        if (!file || pendingRef.current) return
+        beginPending('import')
+        let imported = 0
+        let lastValue
+        try {
+          const raw = await file.text()
+          const parsed = parseImportPayload(raw, limitsRef.current)
+          if (parsed.notes.length === 0) {
+            setActionError(t('没有可导入的便签。', 'No valid notes to import.'))
+            return
+          }
+          for (const note of parsed.notes) {
+            lastValue = await apiCall('add', {
+              text: note.text,
+              tag: note.tag,
+              tone: note.tone,
+              link: note.link,
+              image: '',
+            })
+            imported += 1
+          }
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          accept(lastValue)
+          setNotice(t(
+            '已导入 ' + imported + ' 条便签' + (parsed.skipped > 0 ? '，跳过 ' + parsed.skipped + ' 条无效记录' : '') + '。',
+            'Imported ' + imported + ' note' + (imported === 1 ? '' : 's') + (parsed.skipped > 0 ? ', skipped ' + parsed.skipped + ' invalid' : '') + '.',
+          ))
+        } catch (error) {
+          if (lastValue && aliveRef.current) {
+            loadSeqRef.current += 1
+            accept(lastValue)
+          }
+          if (aliveRef.current) {
+            const prefix = imported > 0 ? t('已导入 ' + imported + ' 条，之后失败：', imported + ' imported, then failed: ') : ''
+            setActionError(prefix + errorText(t, error, limitsRef.current))
+          }
+        } finally {
+          endPending()
+        }
       }
 
       function openSignature() {
@@ -1388,7 +1624,9 @@ window.__ModuleLoader__.load({
       const canAdd = draft.trim().length > 0 && pending === null
       const countText = notes.length === 0
         ? t('还没有便签', 'No notes yet')
-        : t('共 ' + notes.length + ' 条便签', notes.length + (notes.length === 1 ? ' note' : ' notes'))
+        : activeFilters
+          ? t('显示 ' + visibleNotes.length + ' / 共 ' + notes.length + ' 条', visibleNotes.length + ' of ' + notes.length + ' notes')
+          : t('共 ' + notes.length + ' 条便签', notes.length + (notes.length === 1 ? ' note' : ' notes'))
 
       return h('div', {
         className: 'nw-root' + (motion ? ' nw-motion' : '') + (colorScheme === 'dark' ? ' nw-dark' : ''),
@@ -1541,6 +1779,77 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
+          h('div', { className: 'nw-toolbar', key: 'toolbar' },
+            h('input', {
+              ref: searchRef,
+              className: 'nw-search',
+              type: 'search',
+              value: query,
+              placeholder: t('搜索便签（正文 / 标签 / 链接）', 'Search notes (text / tag / link)'),
+              'aria-label': t('搜索便签', 'Search notes'),
+              onChange: function (event) { setQuery(event.target.value) },
+              onKeyDown: function (event) {
+                if (event.key !== 'Escape') return
+                if (query.length > 0) {
+                  event.preventDefault()
+                  setQuery('')
+                } else if (typeof event.currentTarget.blur === 'function') {
+                  event.currentTarget.blur()
+                }
+              },
+            }),
+            h('select', {
+              className: 'nw-filter',
+              value: filterTone,
+              'aria-label': t('按颜色筛选', 'Filter by color'),
+              onChange: function (event) { setFilterTone(event.target.value) },
+            },
+              h('option', { value: 'all' }, t('全部颜色', 'All colors')),
+              TONES.map(function (definition) {
+                return h('option', { key: definition.key, value: definition.key }, toneName(t, definition))
+              }),
+              h('option', { value: 'custom' }, t('自定义色', 'Custom colors')),
+            ),
+            h('select', {
+              className: 'nw-filter',
+              value: filterTag,
+              'aria-label': t('按分类筛选', 'Filter by category'),
+              onChange: function (event) { setFilterTag(event.target.value) },
+            },
+              h('option', { value: 'all' }, t('全部分类', 'All categories')),
+              tags.map(function (tag) {
+                return h('option', { key: tag, value: tag }, tag)
+              }),
+            ),
+            activeFilters
+              ? h('button', {
+                  type: 'button',
+                  className: 'nw-mini',
+                  onClick: clearFilters,
+                }, t('清除筛选', 'Clear filters'))
+              : null,
+            h('div', { className: 'nw-toolbar-actions' },
+              h('a', {
+                className: 'nw-mini nw-export',
+                href: exportHref,
+                download: 'dsh-note-wall-notes.json',
+                title: t('导出便签 JSON（不含图片文件）', 'Export notes as JSON (image files not included)'),
+              }, t('导出 JSON', 'Export JSON')),
+              h('button', {
+                type: 'button',
+                className: 'nw-mini',
+                disabled: pending !== null,
+                onClick: openImport,
+              }, t('导入 JSON', 'Import JSON')),
+              h('input', {
+                ref: importRef,
+                type: 'file',
+                className: 'nw-file-input',
+                accept: 'application/json,.json',
+                onChange: onImportFile,
+              }),
+            ),
+          ),
           actionError
             ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert', key: 'action-error' },
                 h('span', { className: 'nw-banner-text' }, actionError),
@@ -1548,6 +1857,16 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'nw-mini',
                   onClick: function () { setActionError('') },
+                }, t('关闭', 'Dismiss')),
+              )
+            : null,
+          notice
+            ? h('div', { className: 'nw-banner nw-banner-success', role: 'status', key: 'notice' },
+                h('span', { className: 'nw-banner-text' }, notice),
+                h('button', {
+                  type: 'button',
+                  className: 'nw-mini',
+                  onClick: function () { setNotice('') },
                 }, t('关闭', 'Dismiss')),
               )
             : null,
@@ -1568,9 +1887,20 @@ window.__ModuleLoader__.load({
               )
             : null,
           status === 'ready' && notes.length === 0 ? h(EmptyWall, { key: 'empty', t: t }) : null,
-          status === 'ready' && notes.length > 0
+          status === 'ready' && notes.length > 0 && visibleNotes.length === 0
+            ? h('div', { className: 'nw-empty', key: 'no-match' },
+                h('div', { className: 'nw-empty-title' }, t('没有匹配的便签', 'No matching notes')),
+                h('div', { className: 'nw-empty-hint' }, t('换个关键词，或清除筛选。', 'Try another search or clear the filters.')),
+                h('button', {
+                  type: 'button',
+                  className: 'nw-mini',
+                  onClick: clearFilters,
+                }, t('清除筛选', 'Clear filters')),
+              )
+            : null,
+          status === 'ready' && visibleNotes.length > 0
             ? h('div', { className: 'nw-grid', key: 'grid' },
-                notes.map(function (note) {
+                visibleNotes.map(function (note) {
                   return h(NoteCard, {
                     key: note.id,
                     note: note,
