@@ -367,6 +367,47 @@ test('image prefix route matches the real request path and serves the bytes', as
   }
 })
 
+test('a missing image file is a plain 404, not a fallback page', async () => {
+  const { imageRoute, cleanup } = await setup()
+  try {
+    const served = await call(imageRoute, {
+      method: 'GET',
+      headers: {},
+      body: '',
+      url: '/plugins/dsh-note-wall/image/99999999-9999-4999-8999-999999999999.png',
+    })
+    assert.equal(served.status, 404)
+    assert.equal(served.headers['content-type'], 'text/plain; charset=utf-8')
+    assert.equal(served.headers['cache-control'], 'no-store')
+    assert.equal(served.body, 'Not found')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('state marks a missing image without deleting the note or its reference', async () => {
+  const { home, route, uploadRoute, cleanup } = await setup()
+  try {
+    const uploaded = await call(uploadRoute, { body: PNG_BYTES, headers: imageHeaders() })
+    assert.equal(uploaded.status, 200)
+    const image = uploaded.json.value.id
+    const added = await call(route, {
+      payload: { action: 'add', text: '缺图仍保留便签', image: image },
+    })
+    assert.equal(added.status, 200)
+    const noteId = added.json.value.note.id
+    await rm(join(home, 'note-wall', 'images', image))
+
+    const state = await call(route, { payload: { action: 'state' } })
+    assert.equal(state.status, 200)
+    assert.equal(state.json.value.notes.length, 1)
+    assert.equal(state.json.value.notes[0].image, image)
+    assert.deepEqual(Array.from(state.json.value.missingImages), [{ noteId: noteId, image: image }])
+  } finally {
+    await cleanup()
+  }
+})
+
 test('uploads, serves and deletes a note image', async () => {
   const { home, route, uploadRoute, imageRoute, cleanup } = await setup()
   try {

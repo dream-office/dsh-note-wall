@@ -1065,6 +1065,8 @@ window.__ModuleLoader__.load({
       window.__DSH_NOTE_WALL_TEST__.normalizeClientSettings = normalizeClientSettings
       window.__DSH_NOTE_WALL_TEST__.featureEnabled = featureEnabled
       window.__DSH_NOTE_WALL_TEST__.resolveImageDisplay = resolveImageDisplay
+      window.__DSH_NOTE_WALL_TEST__.imageFailureIsFor = imageFailureIsFor
+      window.__DSH_NOTE_WALL_TEST__.missingImageNode = missingImageNode
       window.__DSH_NOTE_WALL_TEST__.folderFilterOptions = folderFilterOptions
       window.__DSH_NOTE_WALL_TEST__.toLocalDateTimeInput = toLocalDateTimeInput
       window.__DSH_NOTE_WALL_TEST__.fromLocalDateTimeInput = fromLocalDateTimeInput
@@ -1601,6 +1603,12 @@ window.__ModuleLoader__.load({
 .nw-note-thumb{display:block;width:96px;height:96px;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);flex:none}
 .nw-note-thumb img{display:block;width:100%;height:100%;object-fit:cover}
 .nw-note-thumb:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-note-image-missing,.nw-edit-image-missing{display:flex;align-items:center;justify-content:center;gap:6px;padding:8px;box-sizing:border-box;overflow:hidden;border-radius:12px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:color-mix(in srgb,var(--dsw-alias-label-primary) 70%,transparent);font-size:11px;text-align:center}
+.nw-note-image-missing{width:96px;height:96px;flex:none}
+.nw-note-image-missing-icon{width:32px;height:32px;padding:0;gap:0;border-radius:8px}
+.nw-note-image-missing-icon span{display:none}
+.nw-note-image-missing-large{width:100%;height:80px;flex:none}
+.nw-edit-image-missing{width:100%;min-height:80px}
 .nw-note:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .nw-note-link{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0;font-size:12px;color:var(--dsw-alias-link);text-decoration:none;padding:2px 0}
 .nw-note-link:hover{text-decoration:underline}
@@ -1789,6 +1797,31 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function imageFailureIsFor(failedUrl, currentUrl) {
+      return typeof failedUrl === 'string' && failedUrl.length > 0 && failedUrl === currentUrl
+    }
+
+    /** A text placeholder, never a fabricated image, for a missing image file. */
+    function missingImageNode(t, display, edit) {
+      const base = edit ? 'nw-edit-image-missing' : 'nw-note-image-missing'
+      const mode = edit
+        ? ''
+        : display === 'icon'
+          ? ' nw-note-image-missing-icon'
+          : display === 'large'
+            ? ' nw-note-image-missing-large'
+            : ''
+      return h('div', {
+        className: base + mode,
+        role: 'img',
+        'aria-label': t('图片缺失', 'Image missing'),
+        title: t('图片文件缺失，仍保留便签数据', 'The image file is missing; note data is kept'),
+      },
+        h(ImageGlyph, { size: display === 'icon' && !edit ? 14 : 16 }),
+        h('span', null, t('图片缺失', 'Missing image')),
+      )
+    }
+
     function NoteCard(props) {
       const note = props.note
       const editing = props.editing
@@ -1801,6 +1834,8 @@ window.__ModuleLoader__.load({
       const confirmRef = React.useRef(null)
       const editFileRef = React.useRef(null)
       const editColorRef = React.useRef(null)
+      const [failedImage, setFailedImage] = React.useState('')
+      const [failedEditImage, setFailedEditImage] = React.useState('')
 
       React.useEffect(function () {
         if (props.confirming && confirmRef.current && typeof confirmRef.current.focus === 'function') {
@@ -1811,6 +1846,18 @@ window.__ModuleLoader__.load({
       const attachedPreview = editing !== null
         ? (editing.imagePreview || (editing.image ? imageUrl(editing.image) : ''))
         : ''
+
+      const image = editing === null && note.image ? imageUrl(note.image) : ''
+      const imageMissing = imageFailureIsFor(failedImage, image)
+      const editImageMissing = imageFailureIsFor(failedEditImage, attachedPreview)
+
+      React.useEffect(function () {
+        setFailedImage('')
+      }, [image])
+
+      React.useEffect(function () {
+        setFailedEditImage('')
+      }, [attachedPreview])
 
       const imageDisplay = resolveImageDisplay(props.imageDisplay)
       const remindersEnabled = props.remindersEnabled === true
@@ -1893,7 +1940,14 @@ window.__ModuleLoader__.load({
               : null,
             attachedPreview
               ? h('div', { className: 'nw-edit-image' },
-                  h('img', { src: attachedPreview, alt: '', draggable: false }),
+                  editImageMissing
+                    ? missingImageNode(t, 'thumbnail', true)
+                    : h('img', {
+                        src: attachedPreview,
+                        alt: '',
+                        draggable: false,
+                        onError: function () { setFailedEditImage(attachedPreview) },
+                      }),
                   h('div', { className: 'nw-edit-image-actions' },
                     h('button', {
                       type: 'button',
@@ -2003,10 +2057,11 @@ window.__ModuleLoader__.load({
               : null,
           )
 
-      const image = editing === null && note.image ? imageUrl(note.image) : ''
       let imageNode = null
       if (image) {
-        if (imageDisplay === 'large') {
+        if (imageMissing) {
+          imageNode = missingImageNode(t, imageDisplay, false)
+        } else if (imageDisplay === 'large') {
           imageNode = h('a', {
             className: 'nw-note-image',
             href: image,
@@ -2014,7 +2069,13 @@ window.__ModuleLoader__.load({
             rel: 'noreferrer noopener',
             title: t('打开大图', 'Open full image'),
             'aria-label': t('打开便签大图', 'Open note image'),
-          }, h('img', { src: image, alt: t('便签图片', 'Note image'), loading: 'lazy', draggable: false }))
+          }, h('img', {
+            src: image,
+            alt: t('便签图片', 'Note image'),
+            loading: 'lazy',
+            draggable: false,
+            onError: function () { setFailedImage(image) },
+          }))
         } else {
           const size = imageDisplay === 'icon' ? 32 : 96
           imageNode = h('a', {
@@ -2025,7 +2086,13 @@ window.__ModuleLoader__.load({
             title: t('打开大图', 'Open full image'),
             'aria-label': t('打开便签大图', 'Open note image'),
             style: { width: size, height: size },
-          }, h('img', { src: image, alt: t('便签图片', 'Note image'), loading: 'lazy', draggable: false }))
+          }, h('img', {
+            src: image,
+            alt: t('便签图片', 'Note image'),
+            loading: 'lazy',
+            draggable: false,
+            onError: function () { setFailedImage(image) },
+          }))
         }
       }
 

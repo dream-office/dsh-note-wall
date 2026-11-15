@@ -15,7 +15,7 @@
 // Session log or writes outside the plugin's own data directory.
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { BACKUP_LIMITS, BackupService } from './lib/backup.js'
@@ -224,10 +224,24 @@ export function apply(ctx) {
     return { notes: store.list(), folders: store.listFolders(), limits: { ...LIMITS } }
   }
 
+  /** Read-only annotation: never clear a note's image reference on a miss. */
+  async function missingImageNotes() {
+    const missing = []
+    for (const note of store.list()) {
+      if (typeof note.image !== 'string' || note.image.length === 0) continue
+      try {
+        await access(join(imagesDir, note.image))
+      } catch (error) {
+        missing.push({ noteId: note.id, image: note.image })
+      }
+    }
+    return missing
+  }
+
   const actions = {
     async state() {
       await ensureStore()
-      return view()
+      return { ...view(), missingImages: await missingImageNotes() }
     },
     async settings() {
       await ensureSettings()

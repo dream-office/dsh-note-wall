@@ -595,6 +595,57 @@ test('folder controls share a 32px tall, no-wrap toolbar row', async () => {
   assert.match(source, /@media \(max-width:420px\)\{[\s\S]*?\.nw-folder-toggle,\.nw-select-toggle\{min-width:max-content/)
 })
 
+test('missing images render a text placeholder in every display mode', () => {
+  for (const mode of ['thumbnail', 'icon', 'large']) {
+    const node = hook.missingImageNode(zh, mode, false)
+    const nodes = collect(node)
+    const placeholder = nodes[0]
+    assert.match(placeholder.props.className, /nw-note-image-missing/)
+    assert.equal(placeholder.props.role, 'img')
+    assert.equal(placeholder.props['aria-label'], '图片缺失')
+    assert.ok(textContent(node).indexOf('图片缺失') >= 0)
+  }
+  const editPlaceholder = hook.missingImageNode(zh, 'thumbnail', true)
+  assert.match(editPlaceholder.props.className, /nw-edit-image-missing/)
+})
+
+test('card images expose onError and a changed image id resets the failure key', () => {
+  const note = sampleNote({ image: IMAGE_ID })
+  const card = hook.NoteCard(baseProps(note))
+  const image = collect(card).find(function (node) { return node.type === 'img' && node.props && node.props.src })
+  assert.ok(image, 'note image missing from the card')
+  assert.equal(typeof image.props.onError, 'function')
+  assert.equal(hook.imageFailureIsFor(image.props.src, image.props.src), true)
+  assert.equal(hook.imageFailureIsFor(image.props.src, '/plugins/dsh-note-wall/image/22222222-2222-4222-8222-222222222222.png'), false)
+  assert.equal(hook.imageFailureIsFor('', image.props.src), false)
+})
+
+test('editing a note with a missing image still offers remove and replace', () => {
+  const note = sampleNote({ image: IMAGE_ID })
+  const editing = {
+    id: note.id,
+    text: note.text,
+    tag: note.tag,
+    tone: note.tone,
+    link: note.link,
+    image: note.image,
+    imageFile: null,
+    imagePreview: '',
+    imageTouched: false,
+    baseUpdatedAt: note.updatedAt,
+  }
+  let cleared = 0
+  const props = baseProps(note, editing)
+  props.onClearEditImage = function () { cleared += 1 }
+  const nodes = collect(hook.NoteCard(props))
+  const remove = nodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '移除图片'
+  })
+  assert.ok(remove, 'remove-image control missing from the edit preview')
+  remove.props.onClick()
+  assert.equal(cleared, 1)
+})
+
 // --- v1.2.0-C: complete backup ZIP, settings.section, first-use guide,
 // --- and interval-level reminder gating -------------------------------------
 
