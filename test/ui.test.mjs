@@ -21,6 +21,14 @@ async function loadClient() {
     Date,
     setTimeout,
     clearTimeout,
+    // Kept minimal: the focus-trap branch reads document.activeElement and the
+    // page-level Escape/outside-click effects only attach listeners in effects,
+    // which the test renderer skips.
+    document: {
+      activeElement: null,
+      addEventListener() {},
+      removeEventListener() {},
+    },
   }
   sandbox.globalThis = sandbox
   vm.runInNewContext(source, sandbox)
@@ -48,7 +56,7 @@ async function loadClient() {
     if (id === 'react') return fakeReact
     throw new Error('unexpected require: ' + id)
   })
-  return { module: module, hook: sandbox.window.__DSH_NOTE_WALL_TEST__ }
+  return { module: module, hook: sandbox.window.__DSH_NOTE_WALL_TEST__, document: sandbox.document }
 }
 
 function collect(node, output) {
@@ -504,6 +512,11 @@ function textContent(node) {
 test('with default settings the page hides folder UI and still exposes the settings entry', () => {
   const nodes = collect(hook.NoteWallPage({ ctx: undefined }))
   assert.equal(
+    nodes.filter(function (node) { return node.type === hook.FolderChips }).length,
+    0,
+    'no folder chips row while folders are off',
+  )
+  assert.equal(
     nodes.filter(function (node) { return node.props && node.props['aria-label'] === '按文件夹筛选' }).length,
     0,
     'folder filter must be hidden while folders are off',
@@ -540,42 +553,53 @@ test('with default settings the page hides folder UI and still exposes the setti
   )
 })
 
-test('enabling folders adds the folder filter, manager and selection controls', () => {
+test('enabling folders adds the chips row and keeps selection, not the old panel', () => {
   const nodes = collect(hook.NoteWallPage({
     ctx: undefined,
     initialSettings: hook.normalizeClientSettings({ folders: { enabled: true } }),
   }))
   assert.equal(
-    nodes.filter(function (node) { return node.props && node.props['aria-label'] === '按文件夹筛选' }).length,
+    nodes.filter(function (node) { return node.type === hook.FolderChips }).length,
     1,
-    'folder filter should appear when folders are enabled',
+    'the top folder chips row should appear when folders are enabled',
+  )
+  assert.equal(
+    nodes.filter(function (node) { return node.props && node.props['aria-label'] === '按文件夹筛选' }).length,
+    0,
+    'the old folder <select> must be gone',
   )
   assert.equal(
     nodes.filter(function (node) {
-      return node.type === 'button' && textContent(node).indexOf('文件夹') >= 0
-    }).length >= 1,
-    true,
-    'folder manager entry should appear',
+      return node.props && typeof node.props.className === 'string' && node.props.className.indexOf('nw-folder-panel') >= 0
+    }).length,
+    0,
+    'the old folder management panel must be gone',
+  )
+  assert.equal(
+    nodes.filter(function (node) {
+      return node.props && typeof node.props.className === 'string' && node.props.className.split(/\s+/).indexOf('nw-folder-toggle') >= 0
+    }).length,
+    0,
+    'the old folder manager button must be gone',
+  )
+  assert.equal(
+    nodes.filter(function (node) { return textContent(node).indexOf('管理文件夹') >= 0 }).length,
+    0,
   )
   assert.equal(
     nodes.filter(function (node) {
       return node.type === 'button' && textContent(node) === '选择'
     }).length,
     1,
-    'selection mode toggle should appear',
+    'selection mode stays available alongside the chips',
   )
-  const folderFilter = nodes.find(function (node) {
-    return node.props && node.props['aria-label'] === '按文件夹筛选'
-  })
-  assert.match(folderFilter.props.className, /\bnw-folder-filter\b/)
-  const folderToggle = nodes.find(function (node) {
-    return node.props && typeof node.props.className === 'string' && node.props.className.split(/\s+/).indexOf('nw-folder-toggle') >= 0
-  })
-  assert.ok(folderToggle, 'folder manager should use the widened toolbar class')
-  const selectToggle = nodes.find(function (node) {
-    return node.props && typeof node.props.className === 'string' && node.props.className.split(/\s+/).indexOf('nw-select-toggle') >= 0
-  })
-  assert.ok(selectToggle, 'selection mode should use the widened toolbar class')
+  const chips = nodes.find(function (node) { return node.type === hook.FolderChips })
+  assert.deepEqual(Array.from(chips.props.folders), [])
+  assert.equal(chips.props.filterFolder, 'all')
+  assert.equal(chips.props.creating, false)
+  assert.equal(typeof chips.props.onFilter, 'function')
+  assert.equal(typeof chips.props.onOpenMenu, 'function')
+  assert.equal(typeof chips.props.onCreate, 'function')
 })
 
 test('cards use one uniform height, clamped text and a bottom action baseline', async () => {
@@ -587,12 +611,551 @@ test('cards use one uniform height, clamped text and a bottom action baseline', 
   assert.match(source, /\.nw-note-foot\{[^}]*margin-top:auto/)
 })
 
-test('folder controls share a 32px tall, no-wrap toolbar row', async () => {
+test('folder chips scroll at 320/360 with a fixed 32px + and no-wrap chips', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  // The scroll strip hides its scrollbar and may shrink below its content.
+  assert.match(source, /\.nw-chips-scroll\{[^}]*flex:1 1 auto[^}]*min-width:0[^}]*overflow-x:auto[^}]*scrollbar-width:none/)
+  assert.match(source, /\.nw-chips-scroll::-webkit-scrollbar\{display:none/)
+  // The + lives outside the scroller so it stays visible at 320 and 360.
+  assert.match(source, /\.nw-chips-row\{display:flex[^}]*min-width:0\}/)
+  assert.match(source, /\.nw-chip\{[^}]*height:32px[^}]*white-space:nowrap/)
+  assert.match(source, /\.nw-chip-add\{[^}]*width:32px/)
+  assert.match(source, /\.nw-chip-input\{[^}]*height:32px/)
+  assert.match(source, /\.nw-menu-item\{[^}]*height:32px/)
+  assert.match(source, /\.nw-note\{[^}]*position:relative/)
+  assert.match(source, /\.nw-note-menu\{position:absolute[^}]*right:10px;bottom:10px/)
+  assert.match(source, /\.nw-dialog-actions \.nw-mini,[^{]*\{height:32px/)
+  assert.match(source, /@media \(max-width:420px\)\{[\s\S]*?\.nw-chip-input\{width:132px/)
+  // The existing 32px toolbar controls are untouched.
   assert.match(source, /\.nw-toolbar \.nw-mini\{[^}]*height:32px[^}]*white-space:nowrap/)
-  assert.match(source, /\.nw-folder-toggle,\.nw-select-toggle\{[^}]*padding:0 14px;gap:8px/)
-  assert.match(source, /\.nw-folder-filter\{min-width:112px\}/)
-  assert.match(source, /@media \(max-width:420px\)\{[\s\S]*?\.nw-folder-toggle,\.nw-select-toggle\{min-width:max-content/)
+  assert.match(source, /\.nw-select-toggle\{[^}]*padding:0 14px;gap:8px/)
+})
+
+test('folder chips list 全部 / 未分类 / each folder with counts and a + add button', () => {
+  const notes = [
+    sampleNote({ id: 'a', folderId: 'f1' }),
+    sampleNote({ id: 'b', folderId: '' }),
+    sampleNote({ id: 'c', folderId: 'f1' }),
+    sampleNote({ id: 'd', folderId: 'f2' }),
+  ]
+  const calls = []
+  const tree = hook.FolderChips({
+    t: zh,
+    folders: [{ id: 'f1', name: '工作' }, { id: 'f2', name: '生活' }],
+    notes: notes,
+    filterFolder: 'f1',
+    creating: false,
+    draftName: '',
+    onFilter(id) { calls.push(['filter', id]) },
+    onStartCreate() { calls.push(['start']) },
+    onOpenMenu() {},
+    onCancelCreate() {},
+    onCreate() {},
+    onDraftName() {},
+    onRename() {},
+    onDelete() {},
+    onCloseMenu() {},
+  })
+  const chips = collect(tree).filter(function (node) { return node.type === hook.FolderChip }).map(function (node) { return node.props })
+  assert.deepEqual(chips.map(function (chip) { return chip.label }), ['全部', '未分类', '工作', '生活'])
+  assert.deepEqual(chips.map(function (chip) { return chip.count }), [4, 1, 2, 1], 'every chip shows its own count')
+  assert.deepEqual(chips.map(function (chip) { return chip.pressed }), [false, false, true, false], 'only the active chip is pressed')
+  assert.deepEqual(chips.map(function (chip) { return chip.manage }), [false, false, true, true], 'only real folders can open a menu')
+
+  const nodes = collect(tree)
+  const add = nodes.find(function (node) {
+    return node.type === 'button' && typeof node.props.className === 'string' && node.props.className.indexOf('nw-chip-add') >= 0
+  })
+  assert.ok(add, 'the trailing + is missing')
+  assert.equal(textContent(add), '+')
+  assert.equal(add.props['aria-label'], '新建文件夹')
+  // The + is a sibling of the scrolling strip, so it cannot scroll out of view.
+  const row = nodes.find(function (node) { return node.props && node.props.className === 'nw-chips-row' })
+  assert.ok(row, 'chips row missing')
+  assert.equal(row.children.some(function (child) {
+    return child.props && child.props.className === 'nw-chips-scroll'
+  }), true)
+  assert.equal(row.children.indexOf(add) >= 0, true, 'the + must live outside the scroll strip')
+  add.props.onClick()
+  assert.deepEqual(calls, [['start']], '+ opens the inline creator')
+
+  chips[2].onSelect()
+  chips[1].onSelect()
+  assert.deepEqual(calls.slice(1), [['filter', 'f1'], ['filter', '']], 'clicking a chip filters by its folder id')
+  assert.equal(hook.folderCount(notes, ''), 1)
+  assert.equal(hook.folderCount(notes, 'f2'), 1)
+  assert.equal(hook.folderCount(notes, 'missing'), 0)
+  assert.deepEqual(
+    Array.from(hook.folderMoveOptions([{ id: 'f1', name: '工作' }]), function (option) { return option.id }),
+    ['', 'f1'],
+  )
+  assert.equal(hook.folderDisplayName(zh, [{ id: 'f1', name: '工作' }], 'f1'), '工作')
+  assert.equal(hook.folderDisplayName(zh, [], ''), '未分类')
+  // Deleting the filtered folder must land on 未分类, never 全部.
+  assert.equal(hook.folderFilterAfterRemove('f1', 'f1'), '')
+  assert.equal(hook.folderFilterAfterRemove('f1', 'f2'), 'f1')
+  assert.equal(hook.folderFilterAfterRemove('all', 'f1'), 'all')
+  assert.equal(hook.folderFilterAfterRemove('', 'f1'), '')
+})
+
+test('the + opens an inline input: Enter creates the folder and Esc cancels', () => {
+  const events = []
+  const inputRef = { current: null }
+  const tree = hook.FolderChips({
+    t: zh,
+    folders: [],
+    notes: [],
+    filterFolder: 'all',
+    creating: true,
+    draftName: '待读',
+    maxLength: 40,
+    createInputRef: inputRef,
+    onFilter() {},
+    onStartCreate() {},
+    onOpenMenu() {},
+    onCancelCreate() { events.push(['cancel']) },
+    onCreate() { events.push(['create']) },
+    onDraftName(value) { events.push(['name', value]) },
+    onRename() {},
+    onDelete() {},
+    onCloseMenu() {},
+  })
+  const nodes = collect(tree)
+  const form = nodes.find(function (node) { return node.props && node.props.className === 'nw-chip-create' })
+  const input = nodes.find(function (node) { return node.type === 'input' })
+  assert.ok(form, 'inline create form missing')
+  assert.ok(input, 'inline create input missing')
+  assert.equal(input.props.value, '待读')
+  assert.equal(input.props.ref, inputRef)
+  assert.equal(input.props['aria-label'], '新文件夹名称')
+  assert.equal(input.props.maxLength, 40)
+  const add = nodes.find(function (node) {
+    return node.type === 'button' && typeof node.props.className === 'string' && node.props.className.indexOf('nw-chip-add') >= 0
+  })
+  assert.equal(add, undefined, 'the + is replaced by the input while creating')
+
+  form.props.onSubmit({ preventDefault() {} })
+  assert.deepEqual(events, [['create']], 'Enter submits the inline form')
+  input.props.onChange({ target: { value: '生活' } })
+  input.props.onKeyDown({ key: 'Escape', preventDefault() {} })
+  assert.deepEqual(events, [['create'], ['name', '生活'], ['cancel']], 'Esc cancels without creating')
+})
+
+test('folder chip menus use menu roles for rename, delete and cancel', () => {
+  const calls = []
+  const firstItemRef = { current: null }
+  const tree = hook.FolderChips({
+    t: zh,
+    folders: [{ id: 'f1', name: '工作' }],
+    notes: [],
+    filterFolder: 'all',
+    creating: false,
+    draftName: '',
+    menuFor: 'f1',
+    firstItemRef: firstItemRef,
+    onFilter() {},
+    onStartCreate() {},
+    onOpenMenu() {},
+    onCancelCreate() {},
+    onCreate() {},
+    onDraftName() {},
+    onRename() { calls.push('rename') },
+    onDelete() { calls.push('delete') },
+    onCloseMenu() { calls.push('close') },
+  })
+  const nodes = collect(tree)
+  const menuElement = nodes.find(function (node) { return node.type === hook.FolderMenu })
+  assert.ok(menuElement, 'chip menu element missing')
+  const menu = collect(hook.FolderMenu(menuElement.props)).find(function (node) {
+    return node.props && node.props.role === 'menu'
+  })
+  assert.ok(menu, 'chip menu missing')
+  assert.equal(menu.props['data-nw-menu'], '1')
+  const items = collect(hook.FolderMenu(menuElement.props)).filter(function (node) {
+    return node.type === 'button' && node.props.role === 'menuitem'
+  })
+  assert.deepEqual(items.map(textContent), ['重命名', '删除文件夹', '取消'])
+  assert.equal(items[0].props.ref, firstItemRef, 'the first item is the focus target on open')
+  items[0].props.onClick()
+  items[1].props.onClick()
+  items[2].props.onClick()
+  assert.deepEqual(calls, ['rename', 'delete', 'close'])
+  menu.props.onKeyDown({ key: 'Escape', preventDefault() {} })
+  assert.deepEqual(calls, ['rename', 'delete', 'close', 'close'], 'Esc closes the chip menu')
+})
+
+test('folder chips are keyboard and touch manageable with a 500ms long press', async () => {
+  assert.equal(hook.FOLDER_LONG_PRESS_MS, 500)
+  const calls = []
+  const button = collect(hook.FolderChip({
+    t: zh,
+    label: '工作',
+    count: 3,
+    pressed: true,
+    manage: true,
+    menuOpen: false,
+    onSelect() { calls.push('select') },
+    onOpenMenu() { calls.push('menu') },
+  }))[0]
+  assert.equal(button.props['aria-pressed'], true)
+  assert.equal(button.props['aria-haspopup'], 'menu')
+  assert.equal(button.props['aria-expanded'], false)
+  assert.equal(button.props['data-nw-menu-toggle'], '1')
+  let prevented = 0
+  button.props.onKeyDown({ key: 'F10', shiftKey: true, preventDefault() { prevented += 1 } })
+  button.props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  button.props.onContextMenu({ preventDefault() { prevented += 1 } })
+  assert.deepEqual(calls, ['menu', 'menu', 'menu'], 'Shift+F10, Enter and right-click all open the menu')
+  assert.equal(prevented, 2)
+
+  const plain = collect(hook.FolderChip({
+    t: zh,
+    label: '全部',
+    count: 4,
+    pressed: true,
+    manage: false,
+    menuOpen: false,
+    onSelect() { calls.push('plain-select') },
+    onOpenMenu() { calls.push('plain-menu') },
+  }))[0]
+  assert.equal(plain.props['aria-haspopup'], undefined)
+  plain.props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  assert.equal(calls.indexOf('plain-menu'), -1, '全部/未分类 never open a menu')
+  plain.props.onClick({ preventDefault() {} })
+  assert.equal(calls.indexOf('plain-select') >= 0, true)
+
+  const opened = []
+  let selected = 0
+  const longPressed = collect(hook.FolderChip({
+    t: zh,
+    label: '工作',
+    count: 1,
+    pressed: false,
+    manage: true,
+    menuOpen: false,
+    onSelect() { selected += 1 },
+    onOpenMenu() { opened.push('menu') },
+  }))[0]
+  longPressed.props.onTouchStart()
+  await new Promise(function (resolve) { setTimeout(resolve, hook.FOLDER_LONG_PRESS_MS + 80) })
+  assert.deepEqual(opened, ['menu'], 'a 500ms touch hold opens the menu')
+  longPressed.props.onClick({ preventDefault() {} })
+  assert.equal(selected, 0, 'the click that follows a long press is swallowed')
+  longPressed.props.onClick({ preventDefault() {} })
+  assert.equal(selected, 1, 'the next tap filters normally')
+
+  const openedAfterMove = []
+  let selectedAfterMove = 0
+  const cancelled = collect(hook.FolderChip({
+    t: zh,
+    label: '工作',
+    count: 1,
+    pressed: false,
+    manage: true,
+    menuOpen: false,
+    onSelect() { selectedAfterMove += 1 },
+    onOpenMenu() { openedAfterMove.push('menu') },
+  }))[0]
+  cancelled.props.onTouchStart()
+  cancelled.props.onTouchMove()
+  await new Promise(function (resolve) { setTimeout(resolve, hook.FOLDER_LONG_PRESS_MS + 80) })
+  assert.deepEqual(openedAfterMove, [], 'touchmove cancels the long press so scrolling never opens a menu')
+  cancelled.props.onClick({ preventDefault() {} })
+  assert.equal(selectedAfterMove, 1)
+})
+
+test('cards with folders enabled show a ⋯ menu instead of the icon pair', () => {
+  const note = sampleNote()
+  const calls = []
+  const props = Object.assign(baseProps(note), {
+    foldersEnabled: true,
+    menuOpen: false,
+    onToggleMenu(value) { calls.push(['toggle', value.id]) },
+    onMoveNote(value) { calls.push(['move', value.id]) },
+    onBeginEdit(value) { calls.push(['edit', value.id]) },
+    onAskDelete() { calls.push(['delete']) },
+    onCloseMenu() { calls.push(['close']) },
+  })
+  const nodes = collect(hook.NoteCard(props))
+  const more = nodes.find(function (node) {
+    return node.type === 'button' && typeof node.props.className === 'string' && node.props.className.indexOf('nw-note-more') >= 0
+  })
+  assert.ok(more, 'the card ⋯ is missing')
+  assert.equal(textContent(more), '⋯')
+  assert.equal(more.props['aria-haspopup'], 'menu')
+  assert.equal(more.props['aria-expanded'], false)
+  more.props.onClick()
+  assert.deepEqual(calls, [['toggle', 'note-a']])
+  assert.equal(nodes.filter(function (node) { return node.type === 'button' && node.props['aria-label'] === '编辑便签' }).length, 0)
+  assert.equal(nodes.filter(function (node) { return node.type === 'button' && node.props['aria-label'] === '删除便签' }).length, 0)
+
+  const openNodes = collect(hook.NoteCard(Object.assign({}, props, { menuOpen: true })))
+  const menu = openNodes.find(function (node) { return node.props && node.props.role === 'menu' })
+  assert.ok(menu, 'card menu missing')
+  assert.equal(menu.props['data-nw-menu'], '1')
+  const items = openNodes.filter(function (node) { return node.type === 'button' && node.props.role === 'menuitem' })
+  assert.deepEqual(items.map(textContent), ['移动到文件夹…', '编辑', '删除便签'])
+  items[0].props.onClick()
+  items[1].props.onClick()
+  items[2].props.onClick()
+  assert.deepEqual(calls.slice(1), [['move', 'note-a'], ['edit', 'note-a'], ['delete']])
+
+  const offNodes = collect(hook.NoteCard(baseProps(sampleNote())))
+  assert.equal(offNodes.some(function (node) {
+    return node.props && typeof node.props.className === 'string' && node.props.className.indexOf('nw-note-more') >= 0
+  }), false, 'without folders the card keeps the icon pair')
+  assert.equal(offNodes.filter(function (node) { return node.type === 'button' && node.props['aria-label'] === '编辑便签' }).length, 1)
+  assert.equal(offNodes.filter(function (node) { return node.type === 'button' && node.props['aria-label'] === '删除便签' }).length, 1)
+})
+
+test('the move dialog lists uncategorized and folders with counts and marks the current one', () => {
+  const notes = [
+    sampleNote({ id: 'a', folderId: 'f1' }),
+    sampleNote({ id: 'b', folderId: '' }),
+    sampleNote({ id: 'c', folderId: 'f1' }),
+  ]
+  const calls = []
+  const tree = hook.MoveDialog({
+    t: zh,
+    titleId: 'move-title',
+    folders: [{ id: 'f1', name: '工作' }, { id: 'f2', name: '生活' }],
+    notes: notes,
+    currentFolderId: 'f1',
+    busy: false,
+    creating: false,
+    draftName: '',
+    error: '已经有同名文件夹了。',
+    onMove(id) { calls.push(['move', id]) },
+    onStartCreate() { calls.push(['start']) },
+    onCancelCreate() { calls.push(['cancel-create']) },
+    onCreate() { calls.push(['create']) },
+    onDraftName() {},
+    onClose() { calls.push(['close']) },
+  })
+  const nodes = collect(tree)
+  const group = nodes.find(function (node) { return node.props && node.props.role === 'radiogroup' })
+  assert.ok(group, 'move options need a radiogroup')
+  const options = nodes.filter(function (node) { return node.type === 'button' && node.props.role === 'radio' })
+  assert.equal(options.length, 3)
+  assert.deepEqual(options.map(function (node) { return node.props['aria-checked'] }), [false, true, false])
+  assert.match(textContent(options[0]), /未分类/)
+  assert.match(textContent(options[0]), /1 条/)
+  assert.match(textContent(options[1]), /工作/)
+  assert.match(textContent(options[1]), /2 条/)
+  assert.match(textContent(options[2]), /生活/)
+  assert.match(textContent(options[2]), /0 条/)
+  assert.equal(nodes.some(function (node) {
+    return node.props && node.props.role === 'alert' && textContent(node) === '已经有同名文件夹了。'
+  }), true, 'a create/move failure is shown inside the move dialog')
+  options[2].props.onClick()
+  assert.deepEqual(calls, [['move', 'f2']])
+
+  const modal = nodes.find(function (node) { return node.type === hook.Modal })
+  assert.ok(modal, 'move dialog is not built on the shared modal')
+  assert.equal(modal.props.title, '移动到文件夹')
+  const modalNodes = collect(hook.Modal(Object.assign({}, modal.props, { children: modal.children })))
+  const dialog = modalNodes.find(function (node) { return node.props && node.props.role === 'dialog' })
+  assert.equal(dialog.props['aria-modal'], 'true')
+  assert.equal(dialog.props['aria-labelledby'], 'move-title')
+  dialog.props.onKeyDown({ key: 'Escape', preventDefault() {}, currentTarget: dialog })
+  assert.ok(calls.some(function (call) { return call[0] === 'close' }), 'Esc closes the move dialog')
+
+  const newFolder = nodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '+ 新建文件夹'
+  })
+  assert.ok(newFolder, 'the move dialog must offer + 新建文件夹')
+  newFolder.props.onClick()
+  assert.ok(calls.some(function (call) { return call[0] === 'start' }))
+})
+
+test('the move dialog creates a new folder and moves the note in one flow', () => {
+  const calls = []
+  const tree = hook.MoveDialog({
+    t: zh,
+    titleId: 'move-title',
+    folders: [],
+    notes: [sampleNote({ folderId: '' })],
+    currentFolderId: '',
+    busy: false,
+    creating: true,
+    draftName: '待读',
+    maxLength: 40,
+    onMove() {},
+    onStartCreate() {},
+    onCancelCreate() { calls.push('cancel-create') },
+    onCreate() { calls.push('create') },
+    onDraftName(value) { calls.push(['name', value]) },
+    onClose() {},
+  })
+  const nodes = collect(tree)
+  const form = nodes.find(function (node) {
+    return node.props && typeof node.props.className === 'string' && node.props.className.indexOf('nw-move-create') >= 0
+  })
+  const input = nodes.find(function (node) { return node.type === 'input' })
+  assert.ok(form, 'inline create form missing from the move dialog')
+  assert.ok(input, 'new folder name input missing')
+  assert.equal(input.props.value, '待读')
+  assert.equal(input.props.maxLength, 40)
+  const submit = nodes.find(function (node) { return node.type === 'button' && node.props.type === 'submit' })
+  assert.ok(submit, '「新建并移入」submit missing')
+  assert.equal(textContent(submit), '新建并移入')
+  form.props.onSubmit({ preventDefault() {} })
+  assert.deepEqual(calls, ['create'])
+  input.props.onKeyDown({ key: 'Escape', preventDefault() {} })
+  assert.deepEqual(calls, ['create', 'cancel-create'])
+
+  const blank = collect(hook.MoveDialog({
+    t: zh,
+    folders: [],
+    notes: [],
+    currentFolderId: '',
+    busy: false,
+    creating: true,
+    draftName: '   ',
+    onMove() {},
+    onStartCreate() {},
+    onCancelCreate() {},
+    onCreate() {},
+    onDraftName() {},
+    onClose() {},
+  })).find(function (node) { return node.type === 'button' && node.props.type === 'submit' })
+  assert.equal(blank.props.disabled, true, 'an empty name cannot be submitted')
+})
+
+test('folder empty states explain how to fill the filter', () => {
+  const calls = []
+  const uncategorized = collect(hook.FolderEmptyState({
+    t: zh,
+    kind: 'uncategorized',
+    folderName: '',
+    onShowAll() { calls.push('all') },
+    onCompose() { calls.push('compose') },
+  }))
+  const uncategorizedText = uncategorized.map(textContent).join('')
+  assert.match(uncategorizedText, /没有未分类的便签/)
+  assert.match(uncategorizedText, /去全部看看/)
+  const showAll = uncategorized.find(function (node) { return node.type === 'button' && textContent(node) === '去全部看看' })
+  showAll.props.onClick()
+  assert.deepEqual(calls, ['all'])
+
+  const folder = collect(hook.FolderEmptyState({
+    t: zh,
+    kind: 'folder',
+    folderName: '工作',
+    onShowAll() { calls.push('all') },
+    onCompose() { calls.push('compose') },
+  }))
+  const folderText = folder.map(textContent).join('')
+  assert.match(folderText, /「工作」还是空的/)
+  assert.match(folderText, /把便签移到这里，或在这里新建/)
+  assert.match(folderText, /记一条/)
+  const compose = folder.find(function (node) { return node.type === 'button' && textContent(node) === '记一条' })
+  compose.props.onClick()
+  assert.deepEqual(calls, ['all', 'compose'], '记一条 focuses the composer')
+
+  // Only a folder-only filter picks the folder copy; text filters keep no-match.
+  assert.equal(hook.folderEmptyKind({ foldersEnabled: true, textFiltersActive: false, filterFolder: '', folderName: '' }), 'uncategorized')
+  assert.equal(hook.folderEmptyKind({ foldersEnabled: true, textFiltersActive: false, filterFolder: 'f1', folderName: '工作' }), 'folder')
+  assert.equal(hook.folderEmptyKind({ foldersEnabled: true, textFiltersActive: true, filterFolder: 'f1', folderName: '工作' }), '', 'search/color/tag misses keep the generic no-match state')
+  assert.equal(hook.folderEmptyKind({ foldersEnabled: false, textFiltersActive: false, filterFolder: '', folderName: '' }), '')
+  assert.equal(hook.folderEmptyKind({ foldersEnabled: true, textFiltersActive: false, filterFolder: 'all', folderName: '' }), '')
+})
+
+test('the rename dialog is a modal form with Enter submit and Esc close', () => {
+  const calls = []
+  const inputRef = { current: null }
+  const tree = hook.RenameFolderDialog({
+    t: zh,
+    titleId: 'rename-title',
+    inputRef: inputRef,
+    value: '工作',
+    maxLength: 40,
+    busy: false,
+    error: '已经有同名文件夹了。',
+    onChange(value) { calls.push(['change', value]) },
+    onSubmit() { calls.push('submit') },
+    onClose() { calls.push('close') },
+  })
+  const nodes = collect(tree)
+  const modal = nodes.find(function (node) { return node.type === hook.Modal })
+  assert.ok(modal, 'rename dialog is not built on the shared modal')
+  assert.equal(modal.props.initialFocusRef, inputRef)
+  assert.equal(modal.props.title, '重命名文件夹')
+  const form = nodes.find(function (node) { return node.props && node.props.className === 'nw-dialog-form' })
+  const input = nodes.find(function (node) { return node.type === 'input' })
+  assert.equal(input.props.value, '工作')
+  assert.equal(input.props.maxLength, 40)
+  assert.equal(input.props['aria-label'], '文件夹名称')
+  assert.equal(nodes.some(function (node) {
+    return node.props && node.props.role === 'alert' && textContent(node) === '已经有同名文件夹了。'
+  }), true, 'a duplicate-name error is shown inside the dialog')
+  form.props.onSubmit({ preventDefault() {} })
+  input.props.onChange({ target: { value: '生活' } })
+  assert.deepEqual(calls, ['submit', ['change', '生活']])
+
+  const modalNodes = collect(hook.Modal(Object.assign({}, modal.props, { children: modal.children })))
+  const dialog = modalNodes.find(function (node) { return node.props && node.props.role === 'dialog' })
+  assert.equal(dialog.props['aria-modal'], 'true')
+  assert.equal(dialog.props['aria-labelledby'], 'rename-title')
+  dialog.props.onKeyDown({ key: 'Escape', preventDefault() {}, currentTarget: dialog })
+  assert.ok(calls.indexOf('close') >= 0, 'Esc closes the rename dialog')
+
+  // Clicking the backdrop closes; clicking inside the dialog does not.
+  const backdrop = modalNodes.find(function (node) {
+    return node.props && node.props.className === 'nw-dialog-backdrop'
+  })
+  const closesBefore = calls.filter(function (call) { return call === 'close' }).length
+  backdrop.props.onClick({ target: backdrop, currentTarget: backdrop })
+  assert.equal(calls.filter(function (call) { return call === 'close' }).length, closesBefore + 1)
+  backdrop.props.onClick({ target: dialog, currentTarget: backdrop })
+  assert.equal(calls.filter(function (call) { return call === 'close' }).length, closesBefore + 1, 'inside clicks never close the dialog')
+
+  const first = { focus() { calls.push('focus-first') } }
+  const last = { focus() { calls.push('focus-last') } }
+  client.document.activeElement = last
+  dialog.props.onKeyDown({
+    key: 'Tab',
+    shiftKey: false,
+    preventDefault() {},
+    currentTarget: { querySelectorAll() { return [first, last] } },
+  })
+  assert.ok(calls.indexOf('focus-first') >= 0, 'Tab wraps from the last control to the first')
+  client.document.activeElement = first
+  dialog.props.onKeyDown({
+    key: 'Tab',
+    shiftKey: true,
+    preventDefault() {},
+    currentTarget: { querySelectorAll() { return [first, last] } },
+  })
+  assert.ok(calls.indexOf('focus-last') >= 0, 'Shift+Tab wraps from the first control to the last')
+})
+
+test('the delete folder dialog says the notes move to 未分类 and are not deleted', () => {
+  const calls = []
+  const tree = hook.DeleteFolderDialog({
+    t: zh,
+    titleId: 'delete-title',
+    folderName: '工作',
+    count: 3,
+    busy: false,
+    onConfirm() { calls.push('confirm') },
+    onClose() { calls.push('close') },
+  })
+  const nodes = collect(tree)
+  const text = nodes.map(textContent).join('')
+  assert.match(text, /「工作」里有 3 条便签/)
+  assert.match(text, /移到「未分类」/)
+  assert.match(text, /不会被删掉/)
+  const confirm = nodes.find(function (node) { return node.type === 'button' && textContent(node) === '删除文件夹' })
+  assert.ok(confirm, 'delete confirmation button missing')
+  assert.match(confirm.props.className, /nw-mini-danger/)
+  confirm.props.onClick()
+  assert.deepEqual(calls, ['confirm'])
+  const modalNodes = collect(hook.Modal(Object.assign({}, nodes.find(function (node) { return node.type === hook.Modal }).props, {
+    children: nodes.find(function (node) { return node.type === hook.Modal }).children,
+  })))
+  const dialog = modalNodes.find(function (node) { return node.props && node.props.role === 'dialog' })
+  assert.equal(dialog.props['aria-labelledby'], 'delete-title')
 })
 
 test('missing images render a text placeholder in every display mode', () => {

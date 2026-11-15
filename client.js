@@ -262,6 +262,52 @@ window.__ModuleLoader__.load({
       return [{ id: 'all' }, { id: '' }].concat(normalizeFolders(folders))
     }
 
+    /** Touch long-press delay that opens a folder chip's management menu. */
+    const FOLDER_LONG_PRESS_MS = 500
+
+    /** How many notes are filed under one folder id ('' = 未分类). */
+    function folderCount(notes, folderId) {
+      let count = 0
+      for (const note of Array.isArray(notes) ? notes : []) {
+        const value = note && typeof note.folderId === 'string' ? note.folderId : ''
+        if (value === folderId) count += 1
+      }
+      return count
+    }
+
+    /** Move-dialog targets in display order: 未分类 first, then every folder. */
+    function folderMoveOptions(folders) {
+      return [{ id: '' }].concat(normalizeFolders(folders))
+    }
+
+    /** Localized name shown for a folder id; '' is always 未分类. */
+    function folderDisplayName(t, folders, folderId) {
+      if (typeof folderId !== 'string' || folderId.length === 0) return t('未分类', 'Uncategorized')
+      const match = normalizeFolders(folders).find(function (folder) { return folder.id === folderId })
+      return match ? match.name : t('未分类', 'Uncategorized')
+    }
+
+    /**
+     * A deleted folder's notes move to 未分类, so a filter pointing at it must
+     * switch to '' rather than 全部.
+     */
+    function folderFilterAfterRemove(currentFilter, removedFolderId) {
+      return currentFilter === removedFolderId ? '' : currentFilter
+    }
+
+    /**
+     * Which empty state the wall needs when a filter leaves no visible note.
+     * Text filters keep the generic no-match state; only an empty folder or an
+     * empty 未分类 gets the folder-specific copy.
+     */
+    function folderEmptyKind(options) {
+      const value = options || {}
+      if (value.foldersEnabled !== true || value.textFiltersActive === true) return ''
+      if (value.filterFolder === 'all') return ''
+      if (value.filterFolder === '') return 'uncategorized'
+      return typeof value.folderName === 'string' && value.folderName.length > 0 ? 'folder' : ''
+    }
+
     function padTwo(value) {
       return value < 10 ? '0' + value : String(value)
     }
@@ -1068,6 +1114,12 @@ window.__ModuleLoader__.load({
       window.__DSH_NOTE_WALL_TEST__.imageFailureIsFor = imageFailureIsFor
       window.__DSH_NOTE_WALL_TEST__.missingImageNode = missingImageNode
       window.__DSH_NOTE_WALL_TEST__.folderFilterOptions = folderFilterOptions
+      window.__DSH_NOTE_WALL_TEST__.folderCount = folderCount
+      window.__DSH_NOTE_WALL_TEST__.folderMoveOptions = folderMoveOptions
+      window.__DSH_NOTE_WALL_TEST__.folderDisplayName = folderDisplayName
+      window.__DSH_NOTE_WALL_TEST__.folderFilterAfterRemove = folderFilterAfterRemove
+      window.__DSH_NOTE_WALL_TEST__.folderEmptyKind = folderEmptyKind
+      window.__DSH_NOTE_WALL_TEST__.FOLDER_LONG_PRESS_MS = FOLDER_LONG_PRESS_MS
       window.__DSH_NOTE_WALL_TEST__.toLocalDateTimeInput = toLocalDateTimeInput
       window.__DSH_NOTE_WALL_TEST__.fromLocalDateTimeInput = fromLocalDateTimeInput
       window.__DSH_NOTE_WALL_TEST__.isReminderDue = isReminderDue
@@ -1091,6 +1143,14 @@ window.__ModuleLoader__.load({
       window.__DSH_NOTE_WALL_TEST__.publishSettings = publishSettings
       window.__DSH_NOTE_WALL_TEST__.errorText = errorText
       window.__DSH_NOTE_WALL_TEST__.NoteCard = NoteCard
+      window.__DSH_NOTE_WALL_TEST__.FolderChips = FolderChips
+      window.__DSH_NOTE_WALL_TEST__.FolderChip = FolderChip
+      window.__DSH_NOTE_WALL_TEST__.FolderMenu = FolderMenu
+      window.__DSH_NOTE_WALL_TEST__.Modal = Modal
+      window.__DSH_NOTE_WALL_TEST__.RenameFolderDialog = RenameFolderDialog
+      window.__DSH_NOTE_WALL_TEST__.DeleteFolderDialog = DeleteFolderDialog
+      window.__DSH_NOTE_WALL_TEST__.MoveDialog = MoveDialog
+      window.__DSH_NOTE_WALL_TEST__.FolderEmptyState = FolderEmptyState
       window.__DSH_NOTE_WALL_TEST__.NoteWallPage = NoteWallPage
       window.__DSH_NOTE_WALL_TEST__.Styles = Styles
       window.__DSH_NOTE_WALL_TEST__.ReminderOverlay = ReminderOverlay
@@ -1593,8 +1653,9 @@ window.__ModuleLoader__.load({
 .nw-add:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 
 .nw-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));grid-auto-rows:1fr;align-items:stretch}
-.nw-note{display:flex;flex-direction:column;gap:10px;height:100%;min-height:248px;overflow:hidden;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 42%,var(--dsw-alias-bg-layer-1));box-sizing:border-box}
+.nw-note{position:relative;display:flex;flex-direction:column;gap:10px;height:100%;min-height:248px;overflow:hidden;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 42%,var(--dsw-alias-bg-layer-1));box-sizing:border-box}
 .nw-note-editing{height:auto;overflow:visible}
+.nw-note-menu-open{z-index:7}
 .nw-note:hover{border-color:var(--dsw-alias-border-l2)}
 .nw-note-editing:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .nw-note-body{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0;overflow:hidden}
@@ -1639,8 +1700,7 @@ window.__ModuleLoader__.load({
 .nw-mini:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .nw-mini:disabled{opacity:.6;cursor:default}
 .nw-toolbar .nw-mini{height:32px;min-height:32px;padding:0 12px;white-space:nowrap;flex:none;gap:6px;display:inline-flex;align-items:center;justify-content:center;line-height:1}
-.nw-folder-toggle,.nw-select-toggle{min-width:max-content;padding:0 14px;gap:8px}
-.nw-folder-filter{min-width:112px}
+.nw-select-toggle{min-width:max-content;padding:0 14px;gap:8px}
 .nw-mini-primary{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base)}
 .nw-mini-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
 .nw-mini-danger{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-secondary)}
@@ -1664,12 +1724,47 @@ window.__ModuleLoader__.load({
 .nw-set-hint{margin:0;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}
 .nw-set-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding-top:2px}
 .nw-set-foot-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
-.nw-folder-panel{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
-.nw-folder-form{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.nw-folder-input{height:28px;min-width:0;flex:1 1 150px;box-sizing:border-box;padding:0 9px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px}
-.nw-folder-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--dsw-alias-label-primary);min-height:26px}
-.nw-folder-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 120px}
-.nw-folder-empty{font-size:11.5px;color:var(--dsw-alias-label-tertiary)}
+/* v1.3.0: top folder chips, chip/card menus, folder dialogs */
+.nw-chips-wrap{position:relative;display:flex;flex-direction:column;gap:6px;min-width:0}
+.nw-chips-row{display:flex;align-items:center;gap:6px;min-width:0}
+.nw-chips-scroll{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;padding:4px 0;scrollbar-width:none;-ms-overflow-style:none}
+.nw-chips-scroll::-webkit-scrollbar{display:none;width:0;height:0}
+.nw-chip{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;height:32px;padding:0 11px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer}
+.nw-chip:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.nw-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-chip[aria-pressed="true"]{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base)}
+.nw-chip-count{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--dsw-alias-label-primary) 62%,transparent)}
+.nw-chip[aria-pressed="true"] .nw-chip-count{color:color-mix(in srgb,var(--dsw-alias-bg-base) 70%,transparent)}
+.nw-chip-add{flex:0 0 auto;width:32px;padding:0;justify-content:center;font-size:18px;font-weight:500}
+.nw-chip-create{display:flex;align-items:center;flex:0 0 auto}
+.nw-chip-input{width:150px;max-width:42vw;height:32px;box-sizing:border-box;padding:0 10px;border-radius:999px;border:.5px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px}
+.nw-chip-input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-chip-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:45;display:flex;flex-direction:column;gap:2px;min-width:180px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:4px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 14px 38px rgba(0,0,0,.18)}
+.nw-menu-item{display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 10px;box-sizing:border-box;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;text-align:left;cursor:pointer}
+.nw-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.nw-menu-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-menu-item-danger{color:var(--dsw-alias-state-error-primary)}
+.nw-menu-title{padding:4px 10px 2px;font-size:11.5px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-note-menu{position:absolute;right:10px;bottom:10px;z-index:6;display:flex;flex-direction:column;gap:2px;min-width:150px;max-width:calc(100% - 20px);box-sizing:border-box;padding:4px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 10px 24px -12px rgba(0,0,0,.45)}
+.nw-dialog-backdrop{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;overflow:auto;background:color-mix(in srgb,var(--dsw-alias-bg-base) 38%,transparent)}
+.nw-dialog{width:min(360px,100%);box-sizing:border-box;display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 18px 48px rgba(0,0,0,.22)}
+.nw-dialog-title{margin:0;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.nw-dialog-text{margin:0;font-size:12.5px;line-height:1.7;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.nw-dialog-error{margin:0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
+.nw-dialog-form{display:flex;flex-direction:column;gap:10px}
+.nw-dialog-input{height:32px;box-sizing:border-box;padding:0 10px;border-radius:9px;border:.5px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px}
+.nw-dialog-input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-dialog-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:2px}
+.nw-move-options{display:flex;flex-direction:column;gap:6px}
+.nw-move-option{display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:0 10px;box-sizing:border-box;border-radius:10px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;text-align:left;cursor:pointer}
+.nw-move-option:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.nw-move-option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-move-option[aria-checked="true"]{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,var(--dsw-alias-bg-layer-1))}
+.nw-move-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-move-count{margin-left:auto;flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.nw-move-create{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.nw-move-create .nw-chip-input{flex:1 1 140px;width:auto;max-width:none}
+.nw-dialog-actions .nw-mini,.nw-move-create .nw-mini,.nw-empty .nw-mini{height:32px;padding:0 14px}
 .nw-select-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);font-size:12px;color:var(--dsw-alias-label-primary)}
 .nw-select-bar select{height:26px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px}
 .nw-note-select{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 80%,transparent);cursor:pointer}
@@ -1742,7 +1837,7 @@ window.__ModuleLoader__.load({
 @keyframes nw-pop{0%{transform:scale(.82)}100%{transform:scale(1)}}
 @keyframes nw-focus{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent)}100%{box-shadow:0 0 0 6px transparent}}
 @media (max-width:720px){.nw-page{padding:20px 16px 36px}.nw-compose{padding:16px 16px 12px;border-radius:18px}.nw-compose-input{min-height:76px;font-size:16.5px}.nw-compose-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-kbd{display:none}.nw-tag-input{width:104px}.nw-grid{grid-template-columns:1fr}.nw-count{font-size:11px}}
-@media (max-width:420px){.nw-toolbar .nw-search{flex-basis:100%}.nw-toolbar .nw-filter{flex:1 1 46%;min-width:0}.nw-toolbar-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-folder-toggle,.nw-select-toggle{min-width:max-content;padding:0 12px}}
+@media (max-width:420px){.nw-toolbar .nw-search{flex-basis:100%}.nw-toolbar .nw-filter{flex:1 1 46%;min-width:0}.nw-toolbar-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-select-toggle{min-width:max-content;padding:0 12px}.nw-chip{padding:0 10px}.nw-chip-input{width:132px;max-width:46vw}.nw-dialog{padding:12px 14px}.nw-move-option{min-height:42px}}
 @media (prefers-reduced-motion:reduce){.nw-swatch,.nw-note,.nw-note-actions,.nw-compose,.nw-add,.nw-spinner{transition:none;animation:none}.nw-motion .nw-note{animation:none;transform:none}.nw-motion .nw-note:hover{transform:none}.nw-motion .nw-compose:focus-within{animation:none}.nw-motion .nw-swatch-selected::before{animation:none}.nw-motion .nw-add:not(:disabled):active{transform:none}.nw-motion .nw-swatch:hover{transform:none}.nw-motion .nw-signature{transition:none}.nw-motion .nw-signature-pop{animation:none}}
 `
 
@@ -1799,6 +1894,481 @@ window.__ModuleLoader__.load({
 
     function imageFailureIsFor(failedUrl, currentUrl) {
       return typeof failedUrl === 'string' && failedUrl.length > 0 && failedUrl === currentUrl
+    }
+
+    /**
+     * One folder-filter chip. Folder chips (not 全部/未分类) can open their
+     * management menu with right-click, a 500ms touch long-press (cancelled by
+     * touchmove), Shift+F10 or Enter. A completed long-press swallows the click
+     * that follows it so filtering does not also run.
+     */
+    function FolderChip(props) {
+      const t = props.t
+      const timerRef = React.useRef(null)
+      const suppressClickRef = React.useRef(false)
+
+      function cancelLongPress() {
+        if (timerRef.current !== null) {
+          clearTimeout(timerRef.current)
+          timerRef.current = null
+        }
+      }
+
+      React.useEffect(function () {
+        return cancelLongPress
+      }, [])
+
+      function openMenu() {
+        if (props.manage !== true) return
+        props.onOpenMenu()
+      }
+
+      function onTouchStart() {
+        if (props.manage !== true) return
+        suppressClickRef.current = false
+        cancelLongPress()
+        timerRef.current = setTimeout(function () {
+          timerRef.current = null
+          suppressClickRef.current = true
+          props.onOpenMenu()
+        }, FOLDER_LONG_PRESS_MS)
+      }
+
+      function onClick(event) {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false
+          if (event && typeof event.preventDefault === 'function') event.preventDefault()
+          return
+        }
+        props.onSelect()
+      }
+
+      function onKeyDown(event) {
+        if (props.manage !== true) return
+        if ((event.key === 'F10' && event.shiftKey === true) || event.key === 'Enter') {
+          event.preventDefault()
+          props.onOpenMenu()
+        }
+      }
+
+      function onContextMenu(event) {
+        if (props.manage !== true) return
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        props.onOpenMenu()
+      }
+
+      return h('button', {
+        type: 'button',
+        ref: props.chipRef,
+        className: 'nw-chip',
+        'aria-pressed': props.pressed === true,
+        'aria-haspopup': props.manage === true ? 'menu' : undefined,
+        'aria-expanded': props.manage === true ? props.menuOpen === true : undefined,
+        'data-nw-menu-toggle': props.manage === true ? '1' : undefined,
+        title: props.manage === true
+          ? t('右键或长按管理文件夹', 'Right-click or long-press to manage this folder')
+          : undefined,
+        onClick: onClick,
+        onContextMenu: onContextMenu,
+        onTouchStart: onTouchStart,
+        onTouchEnd: cancelLongPress,
+        onTouchMove: cancelLongPress,
+        onKeyDown: onKeyDown,
+      },
+        h('span', { className: 'nw-chip-label' }, props.label),
+        h('span', { className: 'nw-chip-count' }, String(props.count)),
+      )
+    }
+
+    /** Menu for one folder chip: rename, delete, cancel. */
+    function FolderMenu(props) {
+      const t = props.t
+      const folder = props.folder
+      return h('div', {
+        className: 'nw-chip-menu',
+        role: 'menu',
+        'data-nw-menu': '1',
+        'aria-label': t('文件夹「' + folder.name + '」', 'Folder "' + folder.name + '"'),
+        onKeyDown: function (event) {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            props.onClose()
+          }
+        },
+      },
+        h('div', { className: 'nw-menu-title' }, t('文件夹「' + folder.name + '」', 'Folder "' + folder.name + '"')),
+        h('button', {
+          type: 'button',
+          role: 'menuitem',
+          className: 'nw-menu-item',
+          ref: props.firstItemRef,
+          onClick: props.onRename,
+        }, t('重命名', 'Rename')),
+        h('button', {
+          type: 'button',
+          role: 'menuitem',
+          className: 'nw-menu-item nw-menu-item-danger',
+          onClick: props.onDelete,
+        }, t('删除文件夹', 'Delete folder')),
+        h('button', {
+          type: 'button',
+          role: 'menuitem',
+          className: 'nw-menu-item',
+          onClick: props.onClose,
+        }, t('取消', 'Cancel')),
+      )
+    }
+
+    /**
+     * The wall's top folder chip row: 全部 / 未分类 / each folder, all with
+     * counts, plus a trailing `+` that stays visible outside the scrolling
+     * strip. Inline creation replaces the `+` with a 32px input.
+     */
+    function FolderChips(props) {
+      const t = props.t
+      const folders = normalizeFolders(props.folders)
+      const notes = Array.isArray(props.notes) ? props.notes : []
+      const menuFor = typeof props.menuFor === 'string' ? props.menuFor : ''
+      const activeFolder = folders.find(function (folder) { return folder.id === menuFor })
+      const options = folderFilterOptions(folders)
+
+      return h('div', { className: 'nw-chips-wrap' },
+        h('div', { className: 'nw-chips-row' },
+          h('div', {
+            className: 'nw-chips-scroll',
+            role: 'group',
+            'aria-label': t('按文件夹筛选', 'Filter by folder'),
+          },
+            options.map(function (option) {
+              const isAll = option.id === 'all'
+              const isUncategorized = option.id === ''
+              const folder = !isAll && !isUncategorized ? option : null
+              const label = isAll
+                ? t('全部', 'All')
+                : isUncategorized
+                  ? t('未分类', 'Uncategorized')
+                  : folder.name
+              return h(FolderChip, {
+                key: isUncategorized ? '__uncategorized' : option.id,
+                id: option.id,
+                label: label,
+                count: isAll ? notes.length : folderCount(notes, option.id),
+                pressed: props.filterFolder === option.id,
+                manage: folder !== null,
+                menuOpen: folder !== null && menuFor === folder.id,
+                chipRef: folder !== null && menuFor === folder.id ? props.activeChipRef : undefined,
+                t: t,
+                onSelect: function () { props.onFilter(option.id) },
+                onOpenMenu: function () { props.onOpenMenu(option.id) },
+              })
+            }),
+          ),
+          props.creating === true
+            ? h('form', {
+                className: 'nw-chip-create',
+                onSubmit: function (event) {
+                  event.preventDefault()
+                  props.onCreate()
+                },
+              },
+                h('input', {
+                  className: 'nw-chip-input',
+                  type: 'text',
+                  ref: props.createInputRef,
+                  value: props.draftName,
+                  maxLength: props.maxLength,
+                  autoFocus: true,
+                  placeholder: t('新建文件夹', 'New folder'),
+                  'aria-label': t('新文件夹名称', 'New folder name'),
+                  onChange: function (event) { props.onDraftName(event.target.value) },
+                  onKeyDown: function (event) {
+                    if (event.key !== 'Escape') return
+                    event.preventDefault()
+                    props.onCancelCreate()
+                  },
+                }),
+              )
+            : h('button', {
+                type: 'button',
+                className: 'nw-chip nw-chip-add',
+                ref: props.addButtonRef,
+                'aria-label': t('新建文件夹', 'New folder'),
+                title: t('新建文件夹', 'New folder'),
+                onClick: props.onStartCreate,
+              }, '+'),
+        ),
+        activeFolder !== undefined
+          ? h(FolderMenu, {
+              folder: activeFolder,
+              t: t,
+              firstItemRef: props.firstItemRef,
+              onRename: props.onRename,
+              onDelete: props.onDelete,
+              onClose: props.onCloseMenu,
+            })
+          : null,
+      )
+    }
+
+    /**
+     * Shared modal chrome: role=dialog + aria-modal, backdrop and Escape close,
+     * Tab focus trap and a caller-supplied initial focus target.
+     */
+    function Modal(props) {
+      React.useEffect(function () {
+        const target = props.initialFocusRef
+        if (target && target.current && typeof target.current.focus === 'function') target.current.focus()
+      }, [])
+
+      function onKeyDown(event) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          props.onClose()
+          return
+        }
+        if (event.key !== 'Tab') return
+        const root = event.currentTarget
+        if (!root || typeof root.querySelectorAll !== 'function') return
+        const items = Array.prototype.slice.call(root.querySelectorAll(
+          'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])',
+        ))
+        if (items.length === 0) return
+        const first = items[0]
+        const last = items[items.length - 1]
+        const active = typeof document !== 'undefined' ? document.activeElement : null
+        if (event.shiftKey === true && active === first) {
+          event.preventDefault()
+          if (last && typeof last.focus === 'function') last.focus()
+        } else if (event.shiftKey !== true && active === last) {
+          event.preventDefault()
+          if (first && typeof first.focus === 'function') first.focus()
+        }
+      }
+
+      return h('div', {
+        className: 'nw-dialog-backdrop',
+        onClick: function (event) {
+          if (event.target === event.currentTarget) props.onClose()
+        },
+      },
+        h('div', {
+          className: 'nw-dialog',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-labelledby': props.titleId,
+          ref: props.dialogRef,
+          onKeyDown: onKeyDown,
+        },
+          h('h3', { className: 'nw-dialog-title', id: props.titleId }, props.title),
+          props.children,
+        ),
+      )
+    }
+
+    /** Rename dialog opened from a folder chip's menu. */
+    function RenameFolderDialog(props) {
+      const t = props.t
+      return h(Modal, {
+        t: t,
+        title: t('重命名文件夹', 'Rename folder'),
+        titleId: props.titleId,
+        initialFocusRef: props.inputRef,
+        onClose: props.onClose,
+      },
+        h('form', {
+          className: 'nw-dialog-form',
+          onSubmit: function (event) {
+            event.preventDefault()
+            props.onSubmit()
+          },
+        },
+          h('input', {
+            className: 'nw-dialog-input',
+            type: 'text',
+            ref: props.inputRef,
+            value: props.value,
+            maxLength: props.maxLength,
+            disabled: props.busy === true,
+            placeholder: t('文件夹名称', 'Folder name'),
+            'aria-label': t('文件夹名称', 'Folder name'),
+            onChange: function (event) { props.onChange(event.target.value) },
+          }),
+          props.error
+            ? h('p', { className: 'nw-dialog-error', role: 'alert' }, props.error)
+            : null,
+          h('div', { className: 'nw-dialog-actions' },
+            h('button', {
+              type: 'button',
+              className: 'nw-mini',
+              disabled: props.busy === true,
+              onClick: props.onClose,
+            }, t('取消', 'Cancel')),
+            h('button', {
+              type: 'submit',
+              className: 'nw-mini nw-mini-primary',
+              disabled: props.busy === true || props.value.trim().length === 0,
+            }, props.busy === true ? t('保存中…', 'Saving…') : t('保存', 'Save')),
+          ),
+        ),
+      )
+    }
+
+    /** Delete confirmation that says, in words, that notes are kept. */
+    function DeleteFolderDialog(props) {
+      const t = props.t
+      return h(Modal, {
+        t: t,
+        title: t('删除文件夹？', 'Delete folder?'),
+        titleId: props.titleId,
+        initialFocusRef: props.cancelRef,
+        onClose: props.onClose,
+      },
+        h('p', { className: 'nw-dialog-text' },
+          t(
+            '「' + props.folderName + '」里有 ' + props.count + ' 条便签。删除后，这些便签会移到「未分类」，不会被删掉。',
+            '"' + props.folderName + '" has ' + props.count + ' note(s). After deleting, those notes move to "Uncategorized" — they are not deleted.',
+          ),
+        ),
+        props.error
+          ? h('p', { className: 'nw-dialog-error', role: 'alert' }, props.error)
+          : null,
+        h('div', { className: 'nw-dialog-actions' },
+          h('button', {
+            type: 'button',
+            className: 'nw-mini',
+            ref: props.cancelRef,
+            disabled: props.busy === true,
+            onClick: props.onClose,
+          }, t('取消', 'Cancel')),
+          h('button', {
+            type: 'button',
+            className: 'nw-mini nw-mini-danger',
+            disabled: props.busy === true,
+            onClick: props.onConfirm,
+          }, props.busy === true ? t('删除中…', 'Deleting…') : t('删除文件夹', 'Delete folder')),
+        ),
+      )
+    }
+
+    /**
+     * Move dialog for one card: 未分类 + every folder with a count, the current
+     * folder marked aria-checked, and an inline "new folder then move" flow.
+     */
+    function MoveDialog(props) {
+      const t = props.t
+      const folders = normalizeFolders(props.folders)
+      const notes = Array.isArray(props.notes) ? props.notes : []
+      const current = typeof props.currentFolderId === 'string' ? props.currentFolderId : ''
+      const options = folderMoveOptions(folders)
+
+      return h(Modal, {
+        t: t,
+        title: t('移动到文件夹', 'Move to folder'),
+        titleId: props.titleId,
+        initialFocusRef: props.firstOptionRef,
+        dialogRef: props.dialogRef,
+        onClose: props.onClose,
+      },
+        h('div', {
+          className: 'nw-move-options',
+          role: 'radiogroup',
+          'aria-label': t('移动到文件夹', 'Move to folder'),
+        },
+          options.map(function (option, index) {
+            const checked = current === option.id
+            return h('button', {
+              key: option.id === '' ? '__uncategorized' : option.id,
+              type: 'button',
+              role: 'radio',
+              'aria-checked': checked,
+              className: 'nw-move-option',
+              ref: index === 0 ? props.firstOptionRef : undefined,
+              disabled: props.busy === true,
+              onClick: function () { props.onMove(option.id) },
+            },
+              h(FolderGlyph, { size: 13 }),
+              h('span', { className: 'nw-move-name' }, option.id === '' ? t('未分类', 'Uncategorized') : option.name),
+              h('span', { className: 'nw-move-count' }, t(folderCount(notes, option.id) + ' 条', folderCount(notes, option.id) + ' notes')),
+            )
+          }),
+        ),
+        props.error
+          ? h('p', { className: 'nw-dialog-error', role: 'alert' }, props.error)
+          : null,
+        props.creating === true
+          ? h('form', {
+              className: 'nw-dialog-form nw-move-create',
+              onSubmit: function (event) {
+                event.preventDefault()
+                props.onCreate()
+              },
+            },
+              h('input', {
+                className: 'nw-chip-input',
+                type: 'text',
+                ref: props.createInputRef,
+                value: props.draftName,
+                maxLength: props.maxLength,
+                autoFocus: true,
+                disabled: props.busy === true,
+                placeholder: t('新建文件夹', 'New folder'),
+                'aria-label': t('新文件夹名称', 'New folder name'),
+                onChange: function (event) { props.onDraftName(event.target.value) },
+                onKeyDown: function (event) {
+                  if (event.key !== 'Escape') return
+                  event.preventDefault()
+                  props.onCancelCreate()
+                },
+              }),
+              h('button', {
+                type: 'submit',
+                className: 'nw-mini nw-mini-primary',
+                disabled: props.busy === true || props.draftName.trim().length === 0,
+              }, props.busy === true ? t('新建中…', 'Creating…') : t('新建并移入', 'Create and move')),
+              h('button', {
+                type: 'button',
+                className: 'nw-mini',
+                disabled: props.busy === true,
+                onClick: props.onCancelCreate,
+              }, t('取消', 'Cancel')),
+            )
+          : h('div', { className: 'nw-dialog-actions' },
+              h('button', {
+                type: 'button',
+                className: 'nw-mini',
+                disabled: props.busy === true,
+                onClick: props.onStartCreate,
+              }, t('+ 新建文件夹', '+ New folder')),
+              h('button', {
+                type: 'button',
+                className: 'nw-mini',
+                disabled: props.busy === true,
+                onClick: props.onClose,
+              }, t('取消', 'Cancel')),
+            ),
+      )
+    }
+
+    /** Empty wall inside one folder filter (all/uncategorized have their own). */
+    function FolderEmptyState(props) {
+      const t = props.t
+      const isFolder = props.kind === 'folder'
+      const title = isFolder
+        ? t('「' + props.folderName + '」还是空的', '"' + props.folderName + '" is still empty')
+        : t('没有未分类的便签', 'No uncategorized notes')
+      const hint = isFolder
+        ? t('把便签移到这里，或在这里新建。', 'Move a note here, or write a new one here.')
+        : t('所有便签都已经分好类了。', 'Every note is already filed.')
+      return h('div', { className: 'nw-empty nw-empty-folder' },
+        h(EmptyStackGlyph, null),
+        h('div', { className: 'nw-empty-title' }, title),
+        h('div', { className: 'nw-empty-hint' }, hint),
+        h('button', {
+          type: 'button',
+          className: 'nw-mini nw-mini-primary',
+          onClick: isFolder ? props.onCompose : props.onShowAll,
+        }, isFolder ? t('记一条', 'Write one') : t('去全部看看', 'See all')),
+      )
     }
 
     /** A text placeholder, never a fabricated image, for a missing image file. */
@@ -2134,28 +2704,83 @@ window.__ModuleLoader__.load({
           }, pending === 'delete' ? t('删除中…', 'Deleting…') : t('删除', 'Delete')),
         ]
       } else {
-        actions = [
-          h('button', {
-            key: 'edit',
-            type: 'button',
-            className: 'nw-iconbtn',
-            title: t('编辑', 'Edit'),
-            'aria-label': t('编辑便签', 'Edit note'),
-            onClick: function () { props.onBeginEdit(note) },
-          }, h(PencilGlyph, { size: 15 })),
-          h('button', {
-            key: 'delete',
-            type: 'button',
-            className: 'nw-iconbtn',
-            title: t('删除', 'Delete'),
-            'aria-label': t('删除便签', 'Delete note'),
-            onClick: props.onAskDelete,
-          }, h(TrashGlyph, { size: 15 })),
-        ]
+        actions = props.foldersEnabled === true
+          ? [
+              h('button', {
+                key: 'more',
+                type: 'button',
+                className: 'nw-iconbtn nw-note-more',
+                ref: props.menuButtonRef,
+                title: t('更多操作', 'More actions'),
+                'aria-label': t('更多操作', 'More actions'),
+                'aria-haspopup': 'menu',
+                'aria-expanded': props.menuOpen === true,
+                'data-nw-menu-toggle': '1',
+                onClick: function () { props.onToggleMenu(note) },
+              }, h('span', { 'aria-hidden': 'true' }, '⋯')),
+            ]
+          : [
+              h('button', {
+                key: 'edit',
+                type: 'button',
+                className: 'nw-iconbtn',
+                title: t('编辑', 'Edit'),
+                'aria-label': t('编辑便签', 'Edit note'),
+                onClick: function () { props.onBeginEdit(note) },
+              }, h(PencilGlyph, { size: 15 })),
+              h('button', {
+                key: 'delete',
+                type: 'button',
+                className: 'nw-iconbtn',
+                title: t('删除', 'Delete'),
+                'aria-label': t('删除便签', 'Delete note'),
+                onClick: props.onAskDelete,
+              }, h(TrashGlyph, { size: 15 })),
+            ]
       }
 
+      // v1.3.0: when folders are on, each card exposes one ⋯ menu instead of the
+      // two icon buttons; the actions are identical, plus 移动到文件夹….
+      const cardMenu = props.foldersEnabled === true
+        && props.menuOpen === true
+        && editing === null
+        && !props.confirming
+        ? h('div', {
+            className: 'nw-note-menu',
+            role: 'menu',
+            'data-nw-menu': '1',
+            'aria-label': t('便签操作', 'Note actions'),
+            onKeyDown: function (event) {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                props.onCloseMenu()
+              }
+            },
+          },
+            h('button', {
+              type: 'button',
+              role: 'menuitem',
+              className: 'nw-menu-item',
+              ref: props.firstMenuItemRef,
+              onClick: function () { props.onMoveNote(note) },
+            }, t('移动到文件夹…', 'Move to folder…')),
+            h('button', {
+              type: 'button',
+              role: 'menuitem',
+              className: 'nw-menu-item',
+              onClick: function () { props.onBeginEdit(note) },
+            }, t('编辑', 'Edit')),
+            h('button', {
+              type: 'button',
+              role: 'menuitem',
+              className: 'nw-menu-item nw-menu-item-danger',
+              onClick: function () { props.onAskDelete() },
+            }, t('删除便签', 'Delete note')),
+          )
+        : null
+
       return h('article', {
-        className: 'nw-note' + toneClass(tone) + (editing !== null ? ' nw-note-editing' : ''),
+        className: 'nw-note' + toneClass(tone) + (editing !== null ? ' nw-note-editing' : '') + (props.menuOpen === true ? ' nw-note-menu-open' : ''),
         style: toneStyle(tone),
         tabIndex: 0,
         'aria-label': t('便签：', 'Note: ') + (note.tag ? note.tag + ' · ' : '') + note.text,
@@ -2169,6 +2794,11 @@ window.__ModuleLoader__.load({
           if (props.confirming) {
             event.preventDefault()
             props.onCancelDelete()
+            return
+          }
+          if (props.menuOpen === true && typeof props.onCloseMenu === 'function') {
+            event.preventDefault()
+            props.onCloseMenu()
           }
         },
       },
@@ -2193,6 +2823,7 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'nw-note-actions' }, actions),
         ),
+        cardMenu,
       )
     }
 
@@ -3031,11 +3662,18 @@ window.__ModuleLoader__.load({
       const [settingsNotice, setSettingsNotice] = React.useState('')
       const [folders, setFolders] = React.useState([])
       const [filterFolder, setFilterFolder] = React.useState('all')
-      const [folderPanelOpen, setFolderPanelOpen] = React.useState(false)
+      const [folderCreating, setFolderCreating] = React.useState(false)
       const [newFolderName, setNewFolderName] = React.useState('')
+      const [folderMenuFor, setFolderMenuFor] = React.useState('')
       const [renamingFolderId, setRenamingFolderId] = React.useState('')
       const [renameFolderValue, setRenameFolderValue] = React.useState('')
       const [deletingFolderId, setDeletingFolderId] = React.useState('')
+      const [noteMenuFor, setNoteMenuFor] = React.useState('')
+      const [moveFor, setMoveFor] = React.useState('')
+      const [moveCreating, setMoveCreating] = React.useState(false)
+      const [moveDraft, setMoveDraft] = React.useState('')
+      const [moveError, setMoveError] = React.useState('')
+      const [folderDialogError, setFolderDialogError] = React.useState('')
       const [selectionMode, setSelectionMode] = React.useState(false)
       const [selected, setSelected] = React.useState({})
       const [selectionFolderId, setSelectionFolderId] = React.useState('')
@@ -3071,6 +3709,25 @@ window.__ModuleLoader__.load({
       const settingsWasOpenRef = React.useRef(false)
       const signatureWasOpenRef = React.useRef(false)
       const signatureTapsRef = React.useRef([])
+      const folderCreateInputRef = React.useRef(null)
+      const addChipButtonRef = React.useRef(null)
+      const chipMenuFirstItemRef = React.useRef(null)
+      const folderChipReturnRef = React.useRef(null)
+      const folderMenuReturnRef = React.useRef(null)
+      const folderDialogReturnRef = React.useRef(null)
+      const renameFolderInputRef = React.useRef(null)
+      const deleteCancelRef = React.useRef(null)
+      const folderMenuWasOpenRef = React.useRef(false)
+      const folderDialogWasOpenRef = React.useRef(false)
+      const cardMenuButtonRef = React.useRef(null)
+      const noteMenuFirstItemRef = React.useRef(null)
+      const noteMenuReturnRef = React.useRef(null)
+      const noteMenuWasOpenRef = React.useRef(false)
+      const moveDialogRef = React.useRef(null)
+      const moveFirstOptionRef = React.useRef(null)
+      const moveCreateInputRef = React.useRef(null)
+      const moveReturnFocusRef = React.useRef(null)
+      const moveWasOpenRef = React.useRef(false)
       const aliveRef = React.useRef(true)
       const limitsRef = React.useRef(DEFAULT_LIMITS)
       const loadSeqRef = React.useRef(0)
@@ -3350,19 +4007,28 @@ window.__ModuleLoader__.load({
       // Turning folders off hides every folder affordance but keeps the data.
       React.useEffect(function () {
         if (foldersEnabled) return
+        folderMenuWasOpenRef.current = false
+        noteMenuWasOpenRef.current = false
+        moveWasOpenRef.current = false
         setFilterFolder('all')
-        setFolderPanelOpen(false)
+        setFolderCreating(false)
+        setFolderMenuFor('')
+        setNoteMenuFor('')
+        setMoveFor('')
+        setMoveCreating(false)
         setSelectionMode(false)
         setSelected({})
         setDeletingFolderId('')
         setRenamingFolderId('')
       }, [foldersEnabled])
 
+      // A deleted (or externally removed) folder falls back to 未分类, because
+      // its notes were moved there; never silently jump to 全部.
       React.useEffect(function () {
         if (!foldersEnabled) return
         if (filterFolder === 'all' || filterFolder === '') return
         if (folders.some(function (folder) { return folder.id === filterFolder })) return
-        setFilterFolder('all')
+        setFilterFolder('')
       }, [foldersEnabled, filterFolder, folders])
 
       React.useEffect(function () {
@@ -3371,6 +4037,125 @@ window.__ModuleLoader__.load({
         if (folders.some(function (folder) { return folder.id === selectionFolderId })) return
         setSelectionFolderId('')
       }, [foldersEnabled, selectionFolderId, folders])
+
+      // Chip menu: focus its first item on open and restore the chip on close.
+      React.useEffect(function () {
+        if (folderMenuFor !== '') {
+          folderMenuWasOpenRef.current = true
+          if (folderChipReturnRef.current) folderMenuReturnRef.current = folderChipReturnRef.current
+          if (chipMenuFirstItemRef.current && typeof chipMenuFirstItemRef.current.focus === 'function') {
+            chipMenuFirstItemRef.current.focus()
+          }
+          return
+        }
+        if (folderMenuWasOpenRef.current) {
+          folderMenuWasOpenRef.current = false
+          if (folderMenuReturnRef.current && typeof folderMenuReturnRef.current.focus === 'function') {
+            folderMenuReturnRef.current.focus()
+          }
+        }
+      }, [folderMenuFor])
+
+      // Rename/delete folder dialogs: restore focus to the originating chip.
+      React.useEffect(function () {
+        const open = renamingFolderId !== '' || deletingFolderId !== ''
+        if (open) {
+          folderDialogWasOpenRef.current = true
+          return
+        }
+        if (folderDialogWasOpenRef.current) {
+          folderDialogWasOpenRef.current = false
+          const target = folderDialogReturnRef.current
+          if (target && typeof target.focus === 'function' && target.isConnected !== false) target.focus()
+        }
+      }, [renamingFolderId, deletingFolderId])
+
+      // Card menu and move dialog focus restore (back to the card's ⋯).
+      React.useEffect(function () {
+        if (noteMenuFor !== '') {
+          noteMenuWasOpenRef.current = true
+          if (cardMenuButtonRef.current) noteMenuReturnRef.current = cardMenuButtonRef.current
+          if (noteMenuFirstItemRef.current && typeof noteMenuFirstItemRef.current.focus === 'function') {
+            noteMenuFirstItemRef.current.focus()
+          }
+          return
+        }
+        if (noteMenuWasOpenRef.current) {
+          noteMenuWasOpenRef.current = false
+          if (noteMenuReturnRef.current && typeof noteMenuReturnRef.current.focus === 'function') {
+            noteMenuReturnRef.current.focus()
+          }
+        }
+      }, [noteMenuFor])
+
+      React.useEffect(function () {
+        if (moveFor !== '') {
+          moveWasOpenRef.current = true
+          return
+        }
+        if (moveWasOpenRef.current) {
+          moveWasOpenRef.current = false
+          const target = moveReturnFocusRef.current
+          if (target && typeof target.focus === 'function' && target.isConnected !== false) target.focus()
+        }
+      }, [moveFor])
+
+      // Escape closes whichever menu/dialog is open, even when focus sits
+      // outside it (the dialogs also handle Escape on their own container).
+      React.useEffect(function () {
+        if (folderMenuFor === '' && noteMenuFor === '' && moveFor === '' && renamingFolderId === '' && deletingFolderId === '' && !folderCreating) {
+          return function () {}
+        }
+        function onKeyDown(event) {
+          if (event.key !== 'Escape' || event.defaultPrevented) return
+          if (moveFor !== '' || renamingFolderId !== '' || deletingFolderId !== '') {
+            if (pendingRef.current) return
+            event.preventDefault()
+            if (moveFor !== '') {
+              setMoveFor('')
+              setMoveCreating(false)
+              setMoveDraft('')
+            }
+            if (renamingFolderId !== '') {
+              setRenamingFolderId('')
+              setRenameFolderValue('')
+            }
+            if (deletingFolderId !== '') setDeletingFolderId('')
+            return
+          }
+          if (folderMenuFor !== '' || noteMenuFor !== '') {
+            event.preventDefault()
+            setFolderMenuFor('')
+            setNoteMenuFor('')
+            return
+          }
+          if (folderCreating) {
+            event.preventDefault()
+            setFolderCreating(false)
+            setNewFolderName('')
+          }
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return function () { document.removeEventListener('keydown', onKeyDown) }
+      }, [folderMenuFor, noteMenuFor, moveFor, renamingFolderId, deletingFolderId, folderCreating])
+
+      // A click outside an open menu closes it; toggles are exempt so their own
+      // click can open/close without racing this listener.
+      React.useEffect(function () {
+        if (folderMenuFor === '' && noteMenuFor === '') return function () {}
+        function onClick(event) {
+          const target = event.target
+          if (target && typeof target.closest === 'function') {
+            if (target.closest('[data-nw-menu]') || target.closest('[data-nw-menu-toggle]')) return
+          }
+          folderMenuWasOpenRef.current = false
+          noteMenuWasOpenRef.current = false
+          setFolderMenuFor('')
+          setNoteMenuFor('')
+        }
+        document.addEventListener('click', onClick)
+        return function () { document.removeEventListener('click', onClick) }
+      }, [folderMenuFor, noteMenuFor])
 
       React.useEffect(function () {
         if (!categoryHistoryEnabled) return
@@ -3569,19 +4354,72 @@ window.__ModuleLoader__.load({
           if (!aliveRef.current) return
           loadSeqRef.current += 1
           accept(value)
+          setFolderCreating(false)
           setNewFolderName('')
           setNotice(t('已新建文件夹。', 'Folder created.'))
         } catch (error) {
+          // Keep the inline input open so a duplicate name can be corrected.
           if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
         } finally {
           endPending()
         }
       }
 
+      function startFolderCreate() {
+        if (pendingRef.current) return
+        folderMenuWasOpenRef.current = false
+        setFolderMenuFor('')
+        setNewFolderName('')
+        setFolderCreating(true)
+      }
+
+      function cancelFolderCreate() {
+        setFolderCreating(false)
+        setNewFolderName('')
+        if (addChipButtonRef.current && typeof addChipButtonRef.current.focus === 'function') {
+          addChipButtonRef.current.focus()
+        }
+      }
+
+      function openFolderMenu(folderId) {
+        if (pendingRef.current) return
+        noteMenuWasOpenRef.current = false
+        setNoteMenuFor('')
+        setFolderMenuFor(folderId)
+      }
+
+      function closeFolderMenu() {
+        setFolderMenuFor('')
+      }
+
       function beginRenameFolder(folder) {
+        folderMenuWasOpenRef.current = false
+        folderDialogReturnRef.current = folderChipReturnRef.current
+        setFolderMenuFor('')
         setDeletingFolderId('')
+        setFolderDialogError('')
         setRenamingFolderId(folder.id)
         setRenameFolderValue(folder.name)
+      }
+
+      function cancelRenameFolder() {
+        setFolderDialogError('')
+        setRenamingFolderId('')
+        setRenameFolderValue('')
+      }
+
+      function beginRemoveFolder(folder) {
+        folderMenuWasOpenRef.current = false
+        folderDialogReturnRef.current = folderChipReturnRef.current
+        setFolderMenuFor('')
+        setRenamingFolderId('')
+        setFolderDialogError('')
+        setDeletingFolderId(folder.id)
+      }
+
+      function cancelRemoveFolder() {
+        setFolderDialogError('')
+        setDeletingFolderId('')
       }
 
       async function renameFolder(event) {
@@ -3597,9 +4435,10 @@ window.__ModuleLoader__.load({
           accept(value)
           setRenamingFolderId('')
           setRenameFolderValue('')
+          setFolderDialogError('')
           setNotice(t('文件夹已重命名。', 'Folder renamed.'))
         } catch (error) {
-          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+          if (aliveRef.current) setFolderDialogError(errorText(tRef.current, error, limitsRef.current))
         } finally {
           endPending()
         }
@@ -3607,6 +4446,7 @@ window.__ModuleLoader__.load({
 
       async function removeFolder(folder) {
         if (pendingRef.current) return
+        const count = folderCount(notes, folder.id)
         beginPending('folder-remove')
         try {
           const value = await apiCall('folderRemove', { id: folder.id })
@@ -3614,11 +4454,118 @@ window.__ModuleLoader__.load({
           loadSeqRef.current += 1
           accept(value)
           setDeletingFolderId('')
-          if (filterFolder === folder.id) setFilterFolder('all')
+          setFolderMenuFor('')
+          setFolderDialogError('')
+          // The folder's notes were moved to 未分类, so show them there rather
+          // than jumping to 全部.
+          setFilterFolder(folderFilterAfterRemove(filterFolder, folder.id))
           if (selectionFolderId === folder.id) setSelectionFolderId('')
-          setNotice(t('文件夹已删除，里面的便签回到未分类。', 'Folder deleted; its notes are uncategorized again.'))
+          setNotice(t(
+            '已删除「' + folder.name + '」，' + count + ' 条便签移到未分类。',
+            'Deleted "' + folder.name + '"; ' + count + ' note(s) moved to Uncategorized.',
+          ))
         } catch (error) {
-          if (aliveRef.current) setActionError(errorText(tRef.current, error, limitsRef.current))
+          if (aliveRef.current) setFolderDialogError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          endPending()
+        }
+      }
+
+      function focusComposer() {
+        if (textareaRef.current && typeof textareaRef.current.focus === 'function') textareaRef.current.focus()
+      }
+
+      function openNoteMenu(note) {
+        if (pendingRef.current) return
+        folderMenuWasOpenRef.current = false
+        setFolderMenuFor('')
+        setNoteMenuFor(function (current) { return current === note.id ? '' : note.id })
+      }
+
+      function closeNoteMenu() {
+        setNoteMenuFor('')
+      }
+
+      function openMoveFor(note) {
+        if (pendingRef.current) return
+        noteMenuWasOpenRef.current = false
+        moveReturnFocusRef.current = cardMenuButtonRef.current
+        setNoteMenuFor('')
+        setMoveFor(note.id)
+        setMoveCreating(false)
+        setMoveDraft('')
+        setMoveError('')
+        setActionError('')
+      }
+
+      function closeMoveDialog() {
+        if (pendingRef.current) return
+        setMoveFor('')
+        setMoveCreating(false)
+        setMoveDraft('')
+        setMoveError('')
+      }
+
+      function startMoveCreate() {
+        setMoveError('')
+        setMoveCreating(true)
+        setMoveDraft('')
+      }
+
+      function cancelMoveCreate() {
+        setMoveError('')
+        setMoveCreating(false)
+        setMoveDraft('')
+      }
+
+      async function moveNoteTo(note, folderId) {
+        if (pendingRef.current) return
+        beginPending('move-note')
+        try {
+          const value = await apiCall('moveNotes', { ids: [note.id], folderId: folderId })
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          accept(value)
+          setMoveFor('')
+          setMoveCreating(false)
+          setMoveDraft('')
+          setMoveError('')
+          const nextFolders = value && Array.isArray(value.folders) ? value.folders : folders
+          const name = folderDisplayName(t, nextFolders, folderId)
+          setNotice(t('已移到「' + name + '」。', 'Moved to "' + name + '".'))
+        } catch (error) {
+          if (aliveRef.current) setMoveError(errorText(tRef.current, error, limitsRef.current))
+        } finally {
+          endPending()
+        }
+      }
+
+      /** `+ 新建文件夹` inside the move dialog: create, then move, in one flow. */
+      async function createFolderAndMove(note) {
+        const name = moveDraft.trim()
+        if (name.length === 0 || pendingRef.current) return
+        beginPending('folder-add')
+        try {
+          const added = await apiCall('folderAdd', { name: name })
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          const nextFolders = added && Array.isArray(added.folders) ? added.folders : []
+          const created = added && added.folder && typeof added.folder.id === 'string'
+            ? added.folder
+            : nextFolders.find(function (folder) { return folder.name === name })
+          if (!created) throw Object.assign(new Error('bad folder response'), { code: 'bad-response' })
+          accept(added)
+          const value = await apiCall('moveNotes', { ids: [note.id], folderId: created.id })
+          if (!aliveRef.current) return
+          loadSeqRef.current += 1
+          accept(value)
+          setMoveFor('')
+          setMoveCreating(false)
+          setMoveDraft('')
+          setMoveError('')
+          setNotice(t('已新建「' + name + '」并移入。', 'Created "' + name + '" and moved the note in.'))
+        } catch (error) {
+          if (aliveRef.current) setMoveError(errorText(tRef.current, error, limitsRef.current))
         } finally {
           endPending()
         }
@@ -3932,6 +4879,9 @@ window.__ModuleLoader__.load({
       }
 
       function beginEdit(note) {
+        noteMenuWasOpenRef.current = false
+        noteMenuReturnRef.current = cardMenuButtonRef.current
+        setNoteMenuFor('')
         revokeEditPreview()
         setConfirming(null)
         setEditing({
@@ -4083,6 +5033,23 @@ window.__ModuleLoader__.load({
         : activeFilters
           ? t('显示 ' + visibleNotes.length + ' / 共 ' + notes.length + ' 条', visibleNotes.length + ' of ' + notes.length + ' notes')
           : t('共 ' + notes.length + ' 条便签', notes.length + (notes.length === 1 ? ' note' : ' notes'))
+
+      const activeFolder = folders.find(function (folder) { return folder.id === folderMenuFor })
+      const renamingFolder = folders.find(function (folder) { return folder.id === renamingFolderId })
+      const removingFolder = folders.find(function (folder) { return folder.id === deletingFolderId })
+      const moveNote = moveFor === '' ? null : notes.find(function (note) { return note.id === moveFor })
+      // Search/color/tag misses keep the generic no-match state; the folder
+      // empties only appear when no text filter is narrowing the wall.
+      const textFiltersActive = query.trim().length > 0 || filterTone !== 'all' || filterTag !== 'all'
+      const emptyFolderName = filterFolder === '' || filterFolder === 'all'
+        ? ''
+        : (folderNames[filterFolder] || '')
+      const emptyKind = folderEmptyKind({
+        foldersEnabled: foldersEnabled,
+        textFiltersActive: textFiltersActive,
+        filterFolder: filterFolder,
+        folderName: emptyFolderName,
+      })
 
       return h('div', {
         className: 'nw-root' + (motion ? ' nw-motion' : '') + (colorScheme === 'dark' ? ' nw-dark' : ''),
@@ -4327,34 +5294,6 @@ window.__ModuleLoader__.load({
               }),
             ),
             foldersEnabled
-              ? h('select', {
-                  className: 'nw-filter nw-folder-filter',
-                  value: filterFolder,
-                  'aria-label': t('按文件夹筛选', 'Filter by folder'),
-                  onChange: function (event) { setFilterFolder(event.target.value) },
-                },
-                  h('option', { value: 'all' }, t('全部文件夹', 'All folders')),
-                  h('option', { value: '' }, t('未分类', 'Uncategorized')),
-                  folders.map(function (folder) {
-                    return h('option', { key: folder.id, value: folder.id }, folder.name)
-                  }),
-                )
-              : null,
-            foldersEnabled
-              ? h('button', {
-                  type: 'button',
-                  className: 'nw-mini nw-folder-toggle' + (folderPanelOpen ? ' nw-mini-primary' : ''),
-                  'aria-expanded': folderPanelOpen,
-                  'aria-pressed': folderPanelOpen,
-                  title: t('管理文件夹', 'Manage folders'),
-                  onClick: function () {
-                    setFolderPanelOpen(function (current) { return !current })
-                    setDeletingFolderId('')
-                    setRenamingFolderId('')
-                  },
-                }, h(FolderGlyph, { size: 13 }), h('span', null, t('文件夹', 'Folders')))
-              : null,
-            foldersEnabled
               ? h('button', {
                   type: 'button',
                   className: 'nw-mini nw-select-toggle' + (selectionMode ? ' nw-mini-primary' : ''),
@@ -4398,93 +5337,35 @@ window.__ModuleLoader__.load({
               }),
             ),
           ),
-          foldersEnabled && folderPanelOpen
-            ? h('div', {
-                className: 'nw-folder-panel',
-                role: 'region',
-                'aria-label': t('文件夹管理', 'Folder management'),
-                key: 'folders',
-              },
-                h('form', { className: 'nw-folder-form', onSubmit: addFolder },
-                  h('input', {
-                    className: 'nw-folder-input',
-                    type: 'text',
-                    value: newFolderName,
-                    maxLength: limits.maxFolderNameChars,
-                    disabled: pending !== null,
-                    placeholder: t('新文件夹名称', 'New folder name'),
-                    'aria-label': t('新文件夹名称', 'New folder name'),
-                    onChange: function (event) { setNewFolderName(event.target.value) },
-                  }),
-                  h('button', {
-                    type: 'submit',
-                    className: 'nw-mini nw-mini-primary',
-                    disabled: newFolderName.trim().length === 0 || pending !== null,
-                  }, pending === 'folder-add' ? t('新建中…', 'Creating…') : t('新建', 'Create')),
-                ),
-                folders.length === 0
-                  ? h('div', { className: 'nw-folder-empty' }, t('还没有文件夹。', 'No folders yet.'))
-                  : null,
-                folders.map(function (folder) {
-                  if (renamingFolderId === folder.id) {
-                    return h('form', { key: folder.id, className: 'nw-folder-row', onSubmit: renameFolder },
-                      h('input', {
-                        className: 'nw-folder-input',
-                        type: 'text',
-                        value: renameFolderValue,
-                        maxLength: limits.maxFolderNameChars,
-                        disabled: pending !== null,
-                        'aria-label': t('文件夹名称', 'Folder name'),
-                        onChange: function (event) { setRenameFolderValue(event.target.value) },
-                      }),
-                      h('button', { type: 'submit', className: 'nw-mini nw-mini-primary', disabled: pending !== null },
-                        t('保存', 'Save')),
-                      h('button', {
-                        type: 'button',
-                        className: 'nw-mini',
-                        disabled: pending !== null,
-                        onClick: function () { setRenamingFolderId(''); setRenameFolderValue('') },
-                      }, t('取消', 'Cancel')),
-                    )
-                  }
-                  if (deletingFolderId === folder.id) {
-                    return h('div', { key: folder.id, className: 'nw-folder-row' },
-                      h('span', { className: 'nw-folder-name' }, folder.name),
-                      h('span', { className: 'nw-folder-empty' }, t('删除后便签回到未分类', 'Notes move to Uncategorized')),
-                      h('button', {
-                        type: 'button',
-                        className: 'nw-mini',
-                        disabled: pending !== null,
-                        onClick: function () { setDeletingFolderId('') },
-                      }, t('取消', 'Cancel')),
-                      h('button', {
-                        type: 'button',
-                        className: 'nw-mini nw-mini-danger',
-                        disabled: pending !== null,
-                        onClick: function () { void removeFolder(folder) },
-                      }, pending === 'folder-remove' ? t('删除中…', 'Deleting…') : t('确认删除', 'Confirm delete')),
-                    )
-                  }
-                  return h('div', { key: folder.id, className: 'nw-folder-row' },
-                    h('span', { className: 'nw-folder-name', title: folder.name }, folder.name),
-                    h('button', {
-                      type: 'button',
-                      className: 'nw-mini',
-                      disabled: pending !== null,
-                      onClick: function () { beginRenameFolder(folder) },
-                    }, t('重命名', 'Rename')),
-                    h('button', {
-                      type: 'button',
-                      className: 'nw-mini nw-mini-danger',
-                      disabled: pending !== null,
-                      onClick: function () {
-                        setRenamingFolderId('')
-                        setDeletingFolderId(folder.id)
-                      },
-                    }, t('删除', 'Delete')),
-                  )
-                }),
-              )
+          foldersEnabled
+            ? h(FolderChips, {
+                key: 'folder-chips',
+                t: t,
+                folders: folders,
+                notes: notes,
+                filterFolder: filterFolder,
+                creating: folderCreating,
+                draftName: newFolderName,
+                maxLength: limits.maxFolderNameChars,
+                menuFor: folderMenuFor,
+                activeChipRef: folderChipReturnRef,
+                addButtonRef: addChipButtonRef,
+                createInputRef: folderCreateInputRef,
+                firstItemRef: chipMenuFirstItemRef,
+                onFilter: function (id) {
+                  folderMenuWasOpenRef.current = false
+                  setFolderMenuFor('')
+                  setFilterFolder(id)
+                },
+                onOpenMenu: openFolderMenu,
+                onStartCreate: startFolderCreate,
+                onCancelCreate: cancelFolderCreate,
+                onCreate: function (event) { void addFolder(event) },
+                onDraftName: setNewFolderName,
+                onRename: function () { if (activeFolder) beginRenameFolder(activeFolder) },
+                onDelete: function () { if (activeFolder) beginRemoveFolder(activeFolder) },
+                onCloseMenu: closeFolderMenu,
+              })
             : null,
           foldersEnabled && selectionMode
             ? h('div', {
@@ -4564,15 +5445,27 @@ window.__ModuleLoader__.load({
             : null,
           status === 'ready' && notes.length === 0 ? h(EmptyWall, { key: 'empty', t: t }) : null,
           status === 'ready' && notes.length > 0 && visibleNotes.length === 0
-            ? h('div', { className: 'nw-empty', key: 'no-match' },
-                h('div', { className: 'nw-empty-title' }, t('没有匹配的便签', 'No matching notes')),
-                h('div', { className: 'nw-empty-hint' }, t('换个关键词，或清除筛选。', 'Try another search or clear the filters.')),
-                h('button', {
-                  type: 'button',
-                  className: 'nw-mini',
-                  onClick: clearFilters,
-                }, t('清除筛选', 'Clear filters')),
-              )
+            ? emptyKind !== ''
+              ? h(FolderEmptyState, {
+                  key: 'folder-empty',
+                  t: t,
+                  kind: emptyKind,
+                  folderName: emptyFolderName,
+                  onShowAll: function () {
+                    setFolderMenuFor('')
+                    setFilterFolder('all')
+                  },
+                  onCompose: focusComposer,
+                })
+              : h('div', { className: 'nw-empty', key: 'no-match' },
+                  h('div', { className: 'nw-empty-title' }, t('没有匹配的便签', 'No matching notes')),
+                  h('div', { className: 'nw-empty-hint' }, t('换个关键词，或清除筛选。', 'Try another search or clear the filters.')),
+                  h('button', {
+                    type: 'button',
+                    className: 'nw-mini',
+                    onClick: clearFilters,
+                  }, t('清除筛选', 'Clear filters')),
+                )
             : null,
           status === 'ready' && visibleNotes.length > 0
             ? h('div', { className: 'nw-grid', key: 'grid' },
@@ -4590,6 +5483,13 @@ window.__ModuleLoader__.load({
                     imageDisplay: settings.imageDisplay,
                     remindersEnabled: remindersEnabled,
                     folderName: foldersEnabled && note.folderId ? (folderNames[note.folderId] || '') : '',
+                    foldersEnabled: foldersEnabled,
+                    menuOpen: noteMenuFor === note.id,
+                    menuButtonRef: noteMenuFor === note.id ? cardMenuButtonRef : undefined,
+                    firstMenuItemRef: noteMenuFor === note.id ? noteMenuFirstItemRef : undefined,
+                    onToggleMenu: openNoteMenu,
+                    onMoveNote: openMoveFor,
+                    onCloseMenu: closeNoteMenu,
                     selectable: foldersEnabled && selectionMode,
                     selected: selected[note.id] === true,
                     onToggleSelect: toggleSelected,
@@ -4599,7 +5499,12 @@ window.__ModuleLoader__.load({
                     onSaveEdit: saveEdit,
                     onCancelDelete: function () { setConfirming(null) },
                     onDelete: removeNote,
-                    onAskDelete: function () { setConfirming(note.id) },
+                    onAskDelete: function () {
+                      noteMenuWasOpenRef.current = false
+                      noteMenuReturnRef.current = cardMenuButtonRef.current
+                      setNoteMenuFor('')
+                      setConfirming(note.id)
+                    },
                     onEditImageFile: attachEditImage,
                     onClearEditImage: clearEditImage,
                   })
@@ -4679,6 +5584,59 @@ window.__ModuleLoader__.load({
                 primaryRef: onboardingPrimaryRef,
                 onKeepOff: closeOnboarding,
                 onOpenSettings: openSettingsFromOnboarding,
+              })
+            : null,
+          renamingFolder
+            ? h(RenameFolderDialog, {
+                key: 'rename-folder',
+                t: t,
+                titleId: 'nw-rename-folder-title',
+                inputRef: renameFolderInputRef,
+                value: renameFolderValue,
+                maxLength: limits.maxFolderNameChars,
+                busy: pending === 'folder-rename',
+                error: folderDialogError,
+                onChange: setRenameFolderValue,
+                onSubmit: function () { void renameFolder() },
+                onClose: cancelRenameFolder,
+              })
+            : null,
+          removingFolder
+            ? h(DeleteFolderDialog, {
+                key: 'delete-folder',
+                t: t,
+                titleId: 'nw-delete-folder-title',
+                folderName: removingFolder.name,
+                count: folderCount(notes, removingFolder.id),
+                busy: pending === 'folder-remove',
+                error: folderDialogError,
+                cancelRef: deleteCancelRef,
+                onConfirm: function () { void removeFolder(removingFolder) },
+                onClose: cancelRemoveFolder,
+              })
+            : null,
+          moveNote
+            ? h(MoveDialog, {
+                key: 'move-note',
+                t: t,
+                titleId: 'nw-move-dialog-title',
+                folders: folders,
+                notes: notes,
+                currentFolderId: typeof moveNote.folderId === 'string' ? moveNote.folderId : '',
+                busy: pending !== null,
+                creating: moveCreating,
+                draftName: moveDraft,
+                error: moveError,
+                maxLength: limits.maxFolderNameChars,
+                dialogRef: moveDialogRef,
+                firstOptionRef: moveFirstOptionRef,
+                createInputRef: moveCreateInputRef,
+                onMove: function (folderId) { void moveNoteTo(moveNote, folderId) },
+                onStartCreate: startMoveCreate,
+                onCancelCreate: cancelMoveCreate,
+                onCreate: function () { void createFolderAndMove(moveNote) },
+                onDraftName: setMoveDraft,
+                onClose: closeMoveDialog,
               })
             : null,
         ),
