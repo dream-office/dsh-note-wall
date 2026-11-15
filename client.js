@@ -69,6 +69,45 @@ window.__ModuleLoader__.load({
     const SIGNATURE_QUOTE_EN = 'Pinning down inspiration, one note at a time.'
     const SIGNATURE_CONSOLE_TEXT = 'dsh-note-wall · dream-office · 把灵感，一张一张贴起来'
 
+    // v1.4.0 Lumen UI unification. The light theme is the plugin's own warm
+    // apricot "paper" palette; dark mode maps every role to the host's
+    // --dsw-alias-* tokens (see the `.nw-dark` block below), so no dark color
+    // is hardcoded here. Note content tones stay the plugin's own pastel art.
+    const NW_PALETTE = Object.freeze({
+      paper: '#FDF5EE',
+      ink: '#2D2A26',
+      accent: '#E8A87C',
+      accentInk: '#7A4418',
+      muted: '#6B5F52',
+    })
+    // B2: a loading row is only rendered once the read takes longer than this,
+    // so a fast local read never flashes a spinner.
+    const LOADING_DELAY_MS = 300
+    // B3/R12: one registry of open surfaces. Escape closes only the surface the
+    // registry reports as topmost; z-order (not open order) decides.
+    const DIALOG_LAYER_OVERLAY = 'reminder-overlay'
+    const DIALOG_LAYER_ONBOARDING = 'onboarding'
+    const DIALOG_LAYER_IMPORT = 'import'
+    const DIALOG_LAYER_FOLDER_DIALOG = 'folder-dialog'
+    const DIALOG_LAYER_MOVE = 'move'
+    const DIALOG_LAYER_SETTINGS = 'settings'
+    const DIALOG_LAYER_SIGNATURE = 'signature'
+    const DIALOG_LAYER_FOLDER_MENU = 'folder-menu'
+    const DIALOG_LAYER_NOTE_MENU = 'note-menu'
+    const DIALOG_LAYER_FOLDER_CREATE = 'folder-create'
+    const DIALOG_LAYER_PRIORITY = Object.freeze({
+      [DIALOG_LAYER_FOLDER_CREATE]: 20,
+      [DIALOG_LAYER_NOTE_MENU]: 30,
+      [DIALOG_LAYER_FOLDER_MENU]: 40,
+      [DIALOG_LAYER_SIGNATURE]: 50,
+      [DIALOG_LAYER_SETTINGS]: 60,
+      [DIALOG_LAYER_MOVE]: 70,
+      [DIALOG_LAYER_FOLDER_DIALOG]: 70,
+      [DIALOG_LAYER_IMPORT]: 80,
+      [DIALOG_LAYER_ONBOARDING]: 80,
+      [DIALOG_LAYER_OVERLAY]: 90,
+    })
+
     const TONES = [
       { key: 'amber', zh: '暖黄', en: 'Amber' },
       { key: 'peach', zh: '蜜桃', en: 'Peach' },
@@ -127,6 +166,115 @@ window.__ModuleLoader__.load({
       } catch (error) {
         // Preference persistence is optional; the page still works without it.
       }
+    }
+
+    // ---------------------------------------------------------------------------
+    // v1.4.0 UI helpers: loading threshold, dialog layer stack, focus trap
+    // ---------------------------------------------------------------------------
+
+    /**
+     * B2: the loading row appears only after LOADING_DELAY_MS. `delayPassed`
+     * comes from the page's timer, so a fast read renders nothing at all.
+     */
+    function loadingIndicatorVisible(status, delayPassed) {
+      return status === 'loading' && delayPassed === true
+    }
+
+    /** The open-layer registry, mutated only from mount/unmount effects. */
+    const DIALOG_LAYERS = []
+
+    /** Register an open surface; returns an idempotent release function. */
+    function pushDialogLayer(id) {
+      if (typeof id !== 'string' || id.length === 0) return function () {}
+      const existing = DIALOG_LAYERS.indexOf(id)
+      if (existing >= 0) DIALOG_LAYERS.splice(existing, 1)
+      DIALOG_LAYERS.push(id)
+      return function () {
+        const index = DIALOG_LAYERS.indexOf(id)
+        if (index >= 0) DIALOG_LAYERS.splice(index, 1)
+      }
+    }
+
+    /**
+     * Topmost surface by z-order priority, not by open order. The reminder
+     * overlay lives in the host's fixed overlay layer, so it stays above the
+     * in-page dialogs even when it appeared first.
+     */
+    function topMostLayer(openLayers) {
+      const layers = Array.isArray(openLayers) ? openLayers : []
+      let top = ''
+      let best = -Infinity
+      for (const id of layers) {
+        if (typeof id !== 'string' || id.length === 0) continue
+        const priority = typeof DIALOG_LAYER_PRIORITY[id] === 'number' ? DIALOG_LAYER_PRIORITY[id] : 0
+        if (priority >= best) {
+          best = priority
+          top = id
+        }
+      }
+      return top
+    }
+
+    function isTopDialogLayer(id) {
+      if (DIALOG_LAYERS.length === 0) return true
+      return topMostLayer(DIALOG_LAYERS) === id
+    }
+
+    /** R12: after an editor closes, focus goes back to the card that owned it. */
+    function editFocusTarget(wasEditing, editing, cardElement) {
+      if (wasEditing === true && editing === null
+        && cardElement && typeof cardElement.focus === 'function') {
+        return cardElement
+      }
+      return null
+    }
+
+    const FOCUSABLE_SELECTOR = 'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])'
+
+    function focusableControls(root) {
+      if (!root || typeof root.querySelectorAll !== 'function') return []
+      try {
+        return Array.prototype.slice.call(root.querySelectorAll(FOCUSABLE_SELECTOR))
+          .filter(function (element) { return !element || element.disabled !== true })
+      } catch (error) {
+        return []
+      }
+    }
+
+    /** Tab wrap target for a focus trap; null means "let the browser move". */
+    function focusTrapTarget(items, activeElement, shiftKey) {
+      const list = Array.isArray(items) ? items : []
+      if (list.length === 0) return null
+      const first = list[0]
+      const last = list[list.length - 1]
+      if (shiftKey === true && activeElement === first) return last
+      if (shiftKey !== true && activeElement === last) return first
+      return null
+    }
+
+    /**
+     * Shared dialog keyboard contract (R12): Escape closes, Tab wraps inside
+     * the dialog. Returns true when the event was consumed.
+     */
+    function handleDialogKeyDown(event, options) {
+      if (!event || typeof event !== 'object') return false
+      if (event.key === 'Escape') {
+        if (options && typeof options.onClose === 'function') {
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          options.onClose()
+        }
+        return true
+      }
+      if (event.key !== 'Tab') return false
+      const items = focusableControls(event.currentTarget)
+      if (items.length === 0) return false
+      const active = typeof document !== 'undefined' ? document.activeElement : null
+      const target = focusTrapTarget(items, active, event.shiftKey === true)
+      if (target && typeof target.focus === 'function') {
+        if (typeof event.preventDefault === 'function') event.preventDefault()
+        target.focus()
+      }
+      return true
     }
 
     // ---------------------------------------------------------------------------
@@ -1159,6 +1307,23 @@ window.__ModuleLoader__.load({
       window.__DSH_NOTE_WALL_TEST__.SettingsSection = SettingsSection
       window.__DSH_NOTE_WALL_TEST__.ImportDialog = ImportDialog
       window.__DSH_NOTE_WALL_TEST__.OnboardingGuide = OnboardingGuide
+      window.__DSH_NOTE_WALL_TEST__.NW_PALETTE = NW_PALETTE
+      window.__DSH_NOTE_WALL_TEST__.LOADING_DELAY_MS = LOADING_DELAY_MS
+      window.__DSH_NOTE_WALL_TEST__.loadingIndicatorVisible = loadingIndicatorVisible
+      window.__DSH_NOTE_WALL_TEST__.topMostLayer = topMostLayer
+      window.__DSH_NOTE_WALL_TEST__.pushDialogLayer = pushDialogLayer
+      window.__DSH_NOTE_WALL_TEST__.isTopDialogLayer = isTopDialogLayer
+      window.__DSH_NOTE_WALL_TEST__.focusTrapTarget = focusTrapTarget
+      window.__DSH_NOTE_WALL_TEST__.focusableControls = focusableControls
+      window.__DSH_NOTE_WALL_TEST__.handleDialogKeyDown = handleDialogKeyDown
+      window.__DSH_NOTE_WALL_TEST__.DIALOG_LAYER_PRIORITY = DIALOG_LAYER_PRIORITY
+      window.__DSH_NOTE_WALL_TEST__.ErrorBanner = ErrorBanner
+      window.__DSH_NOTE_WALL_TEST__.editFocusTarget = editFocusTarget
+      // The stylesheet strings are assembled after the hook block, so expose
+      // lazy getters instead of values (the module has finished by test time).
+      window.__DSH_NOTE_WALL_TEST__.getCss = function () { return CSS }
+      window.__DSH_NOTE_WALL_TEST__.getOverlayCss = function () { return OVERLAY_CSS }
+      window.__DSH_NOTE_WALL_TEST__.getTokensCss = function () { return NW_TOKENS }
     }
 
     // ---------------------------------------------------------------------------
@@ -1514,6 +1679,15 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** B2 error glyph: host error color comes from currentColor. */
+    function ErrorGlyph(props) {
+      const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 14
+      return h('svg', svgProps(size),
+        h('circle', { key: 'ring', cx: 12, cy: 12, r: 8.5 }),
+        h('path', { key: 'mark', d: 'M12 7.6v5.2M12 16.4v.1' }),
+      )
+    }
+
     function SparkleGlyph(props) {
       const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 14
       return h('svg', svgProps(size),
@@ -1568,30 +1742,80 @@ window.__ModuleLoader__.load({
     // Scoped stylesheet, rendered as a style element inside the page root
     // ---------------------------------------------------------------------------
 
-    const CSS = `
-.nw-root{height:100%;overflow:auto;box-sizing:border-box;color:var(--dsw-alias-label-primary);font-size:13px;scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l2) transparent}
+    // ---------------------------------------------------------------------------
+    // Lumen token layer (v1.4.0)
+    //
+    // Light mode owns the warm-apricot paper palette. Dark mode maps every
+    // role back to the host's --dsw-alias-* tokens, so the plugin never
+    // hardcodes a dark surface or text color. Shared by the page stylesheet
+    // and the shell overlay stylesheet.
+    // ---------------------------------------------------------------------------
+
+    const NW_TOKENS = `
+.nw-root,.nw-settings-page,.nw-ov-layer{
+  /* Project color is recognition/accent only; surfaces, cards, borders and
+     body text stay on the host --dsw-alias-* tokens (see the design hard rule). */
+  --nw-paper:${NW_PALETTE.paper};
+  --nw-ink:var(--dsw-alias-label-primary);
+  --nw-muted:var(--dsw-alias-label-secondary);
+  --nw-accent-ink:${NW_PALETTE.accentInk};
+  --nw-project-accent:${NW_PALETTE.accent};
+  --nw-accent-soft:#FBE9DC;
+  --nw-accent-line:#EFC9AE;
+  --nw-on-accent:#2D2A26;
+  --nw-surface:var(--dsw-alias-bg-layer-1);
+  --nw-surface-2:var(--dsw-alias-bg-layer-2);
+  --nw-hover:var(--dsw-alias-interactive-bg-hover);
+  --nw-line:var(--dsw-alias-border-l2);
+  --nw-line-soft:var(--dsw-alias-border-l1);
+  --nw-focus:var(--nw-accent-ink);
+  --nw-link:var(--nw-accent-ink);
+  --nw-scrim:color-mix(in srgb,var(--dsw-alias-bg-base) 55%,transparent);
+}
+.nw-dark{
+  --nw-paper:var(--dsw-alias-bg-base);
+  --nw-ink:var(--dsw-alias-label-primary);
+  --nw-muted:var(--dsw-alias-label-secondary);
+  --nw-accent-ink:var(--dsw-alias-brand-primary);
+  --nw-project-accent:var(--dsw-alias-brand-primary);
+  --nw-surface:var(--dsw-alias-bg-layer-1);
+  --nw-surface-2:var(--dsw-alias-bg-layer-2);
+  --nw-hover:var(--dsw-alias-interactive-bg-hover);
+  --nw-line:var(--dsw-alias-border-l2);
+  --nw-line-soft:var(--dsw-alias-border-l1);
+  --nw-focus:var(--dsw-alias-brand-primary);
+  --nw-link:var(--dsw-alias-link);
+  --nw-scrim:color-mix(in srgb,var(--dsw-alias-bg-base) 55%,transparent);
+}
+`
+
+    const CSS = NW_TOKENS + `
+.nw-root{height:100%;overflow:auto;box-sizing:border-box;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nw-line) transparent}
 .nw-root::-webkit-scrollbar{width:10px;height:10px}
 .nw-root::-webkit-scrollbar-track{background:transparent}
-.nw-root::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:999px}
-.nw-page{max-width:1120px;margin:0 auto;padding:28px 32px 48px;box-sizing:border-box;display:flex;flex-direction:column;gap:18px;min-height:100%}
+.nw-root::-webkit-scrollbar-thumb{background:var(--nw-line);border-radius:999px}
+/* B1 safety net: every focusable control gets a visible ring unless a later,
+   equally specific rule deliberately shows focus on its parent instead. */
+.nw-root :focus-visible,.nw-settings-page :focus-visible,.nw-ov-layer :focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-page{max-width:1120px;margin:0 auto;padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px;min-height:100%}
 .nw-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.nw-title{margin:0;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:.01em;color:var(--dsw-alias-label-primary)}
-.nw-sub{margin:4px 0 0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}
-.nw-count{font-size:12px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.nw-title{margin:0;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:.01em;color:var(--nw-ink)}
+.nw-sub{margin:4px 0 0;font-size:12px;line-height:1.6;color:var(--nw-muted)}
+.nw-count{font-size:12px;color:var(--nw-muted);font-variant-numeric:tabular-nums}
 .nw-head-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.nw-motion-toggle{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:transparent;color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);font-family:inherit;font-size:11.5px;cursor:pointer}
-.nw-motion-toggle:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.nw-motion-toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-motion-dot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-border-l2)}
-.nw-motion-on .nw-motion-dot{background:var(--dsw-alias-brand-primary)}
-.nw-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.nw-search{flex:1 1 220px;min-width:150px;height:32px;box-sizing:border-box;padding:0 10px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px}
-.nw-search::placeholder{color:color-mix(in srgb,var(--dsw-alias-label-primary) 66%,transparent);opacity:1}
-.nw-search:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.nw-filter{height:32px;padding:0 8px;border-radius:9px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;cursor:pointer}
-.nw-filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-motion-toggle{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 12px;border-radius:999px;border:.5px solid var(--nw-line);background:transparent;color:color-mix(in srgb,var(--nw-ink) 84%,transparent);font-family:inherit;font-size:12px;cursor:pointer}
+.nw-motion-toggle:hover{background:var(--nw-hover);color:var(--nw-ink)}
+.nw-motion-toggle:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-motion-dot{width:6px;height:6px;border-radius:999px;background:var(--nw-line)}
+.nw-motion-on .nw-motion-dot{background:var(--nw-focus)}
+.nw-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.nw-search{flex:1 1 220px;min-width:150px;height:32px;box-sizing:border-box;padding:0 12px;border-radius:10px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:13px}
+.nw-search::placeholder{color:color-mix(in srgb,var(--nw-ink) 66%,transparent);opacity:1}
+.nw-search:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
+.nw-filter{height:32px;padding:0 8px;border-radius:10px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:13px;cursor:pointer}
+.nw-filter:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
 .nw-toolbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
-.nw-banner-success{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
+.nw-banner-success{border-color:var(--nw-line);background:var(--nw-surface)}
 
 .nw-tone-amber{--nw-accent:#F0C24B}
 .nw-tone-peach{--nw-accent:#F2A6BC}
@@ -1602,225 +1826,227 @@ window.__ModuleLoader__.load({
 
 /* Dark theme: keep the tinted surfaces darker so the host's light text keeps
    full contrast instead of sitting on a mid-tone olive/brown card. */
-.nw-dark .nw-compose{background:color-mix(in srgb,var(--nw-accent) 26%,var(--dsw-alias-bg-layer-1))}
-.nw-dark .nw-note{background:color-mix(in srgb,var(--nw-accent) 22%,var(--dsw-alias-bg-layer-1))}
+.nw-dark .nw-compose{background:color-mix(in srgb,var(--nw-accent) 26%,var(--nw-surface))}
+.nw-dark .nw-note{background:color-mix(in srgb,var(--nw-accent) 22%,var(--nw-surface))}
 
 /* A custom color can be arbitrarily dark or light, so keep its surface near the
    theme surface and express the hue through a tinted border instead of dropping
    the text/placeholder contrast. */
-.nw-tone-custom.nw-compose{background:color-mix(in srgb,var(--nw-accent) 22%,var(--dsw-alias-bg-layer-1));border-color:color-mix(in srgb,var(--nw-accent) 58%,var(--dsw-alias-border-l1))}
-.nw-tone-custom.nw-note{background:color-mix(in srgb,var(--nw-accent) 20%,var(--dsw-alias-bg-layer-1));border-color:color-mix(in srgb,var(--nw-accent) 58%,var(--dsw-alias-border-l1))}
-.nw-dark .nw-tone-custom.nw-compose{background:color-mix(in srgb,var(--nw-accent) 17%,var(--dsw-alias-bg-layer-1))}
-.nw-dark .nw-tone-custom.nw-note{background:color-mix(in srgb,var(--nw-accent) 15%,var(--dsw-alias-bg-layer-1))}
+.nw-tone-custom.nw-compose{background:color-mix(in srgb,var(--nw-accent) 22%,var(--nw-surface));border-color:color-mix(in srgb,var(--nw-accent) 58%,var(--nw-line-soft))}
+.nw-tone-custom.nw-note{background:color-mix(in srgb,var(--nw-accent) 20%,var(--nw-surface));border-color:color-mix(in srgb,var(--nw-accent) 58%,var(--nw-line-soft))}
+.nw-dark .nw-tone-custom.nw-compose{background:color-mix(in srgb,var(--nw-accent) 17%,var(--nw-surface))}
+.nw-dark .nw-tone-custom.nw-note{background:color-mix(in srgb,var(--nw-accent) 15%,var(--nw-surface))}
 
-.nw-compose{border-radius:22px;padding:20px 22px 14px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 52%,var(--dsw-alias-bg-layer-1))}
-.nw-compose:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-compose-dragging{outline:2px dashed var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-compose-input{display:block;width:100%;box-sizing:border-box;min-height:92px;padding:0;border:none;outline:none;background:transparent;resize:none;font-family:inherit;font-size:17.5px;line-height:1.65;color:var(--dsw-alias-label-primary)}
-.nw-compose-input::placeholder{color:color-mix(in srgb,var(--dsw-alias-label-primary) 70%,transparent);opacity:1}
+.nw-compose{border-radius:20px;padding:16px 16px 12px;border:.5px solid var(--nw-line-soft);background:var(--nw-surface);background:color-mix(in srgb,var(--nw-accent) 52%,var(--nw-surface))}
+.nw-compose:focus-within{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-compose-dragging{outline:2px dashed var(--nw-focus);outline-offset:2px}
+.nw-compose-input{display:block;width:100%;box-sizing:border-box;min-height:92px;padding:0;border:none;outline:none;background:transparent;resize:none;font-family:inherit;font-size:15px;line-height:1.65;color:var(--nw-ink)}
+.nw-compose-input::placeholder{color:color-mix(in srgb,var(--nw-ink) 70%,transparent);opacity:1}
 .nw-compose-input:focus-visible{outline:none}
-.nw-compose-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:10px}
-.nw-palette{display:flex;align-items:center;gap:4px;padding:2px}
-.nw-swatch{position:relative;width:24px;height:24px;padding:0;border:none;border-radius:50%;background:transparent;cursor:pointer;flex:none;transition:transform .12s ease}
-.nw-swatch::before{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--nw-accent);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l1)}
+.nw-compose-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:12px}
+.nw-palette{display:flex;align-items:center;gap:4px;padding:4px}
+.nw-swatch{position:relative;width:28px;height:28px;padding:0;border:none;border-radius:999px;background:transparent;cursor:pointer;flex:none;transition:transform .12s ease}
+.nw-swatch::before{content:"";position:absolute;inset:3px;border-radius:999px;background:var(--nw-accent);box-shadow:inset 0 0 0 1px var(--nw-line-soft)}
 .nw-motion .nw-swatch:hover{transform:scale(1.06)}
-.nw-swatch-selected::before{box-shadow:0 0 0 2px var(--dsw-alias-bg-layer-1),0 0 0 3px var(--dsw-alias-label-primary)}
-.nw-swatch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-swatch-selected::before{box-shadow:0 0 0 2px var(--nw-surface),0 0 0 4px var(--nw-project-accent)}
+.nw-swatch:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
 .nw-swatch-small::before{inset:5px}
 .nw-swatch-custom::before{background:var(--nw-custom,conic-gradient(from 210deg,#F0C24B,#F2A6BC,#8FC4F0,#7FD3C0,#B79CF0,#F0C24B))}
-.nw-tag-input{width:128px;height:30px;padding:0 9px;border-radius:9px;border:.5px solid color-mix(in srgb,var(--dsw-alias-label-primary) 16%,transparent);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 45%,transparent);font-family:inherit;font-size:12.5px;color:var(--dsw-alias-label-primary)}
-.nw-tag-input::placeholder{color:color-mix(in srgb,var(--dsw-alias-label-primary) 68%,transparent);opacity:1}
-.nw-tag-input:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 70%,transparent)}
-.nw-tag-input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px;background:var(--dsw-alias-bg-layer-1)}
-.nw-link-field{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 9px;border-radius:9px;border:.5px solid color-mix(in srgb,var(--dsw-alias-label-primary) 16%,transparent);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 45%,transparent);color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);min-width:0}
-.nw-link-field:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 70%,transparent)}
-.nw-link-field:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px;background:var(--dsw-alias-bg-layer-1)}
-.nw-link-input{width:132px;min-width:64px;border:none;outline:none;background:transparent;font-family:inherit;font-size:12.5px;color:var(--dsw-alias-label-primary)}
-.nw-link-input::placeholder{color:color-mix(in srgb,var(--dsw-alias-label-primary) 66%,transparent);opacity:1}
-.nw-attach-btn{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 10px;border-radius:999px;border:.5px solid color-mix(in srgb,var(--dsw-alias-label-primary) 16%,transparent);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 30%,transparent);color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);font-family:inherit;font-size:12.5px;cursor:pointer}
-.nw-attach-btn:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 65%,transparent);color:var(--dsw-alias-label-primary)}
-.nw-attach-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-tag-input{width:128px;height:32px;padding:0 12px;border-radius:10px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface) 45%,transparent);font-family:inherit;font-size:13px;color:var(--nw-ink)}
+.nw-tag-input::placeholder{color:color-mix(in srgb,var(--nw-ink) 68%,transparent);opacity:1}
+.nw-tag-input:hover{background:color-mix(in srgb,var(--nw-hover) 70%,transparent)}
+.nw-tag-input:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px;background:var(--nw-surface)}
+.nw-link-field{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:10px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface) 45%,transparent);color:color-mix(in srgb,var(--nw-ink) 84%,transparent);min-width:0}
+.nw-link-field:hover{background:color-mix(in srgb,var(--nw-hover) 70%,transparent)}
+.nw-link-field:focus-within{outline:2px solid var(--nw-focus);outline-offset:1px;background:var(--nw-surface)}
+.nw-link-input{width:132px;min-width:64px;border:none;outline:none;background:transparent;font-family:inherit;font-size:13px;color:var(--nw-ink)}
+.nw-link-input::placeholder{color:color-mix(in srgb,var(--nw-ink) 66%,transparent);opacity:1}
+.nw-attach-btn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:999px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface) 30%,transparent);color:color-mix(in srgb,var(--nw-ink) 84%,transparent);font-family:inherit;font-size:13px;cursor:pointer}
+.nw-attach-btn:hover{background:color-mix(in srgb,var(--nw-hover) 65%,transparent);color:var(--nw-ink)}
+.nw-attach-btn:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
 .nw-file-input{display:none}
-.nw-compose-preview{display:flex;align-items:center;gap:10px;margin-top:10px;padding:6px 8px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
-.nw-preview-thumb{width:44px;height:44px;border-radius:8px;object-fit:cover;flex:none;background:var(--dsw-alias-bg-layer-2)}
-.nw-preview-meta{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;font-size:11px;color:var(--dsw-alias-label-secondary)}
+.nw-compose-preview{display:flex;align-items:center;gap:12px;margin-top:12px;padding:8px 12px;border-radius:12px;border:.5px solid var(--nw-line);background:var(--nw-surface)}
+.nw-preview-thumb{width:44px;height:44px;border-radius:10px;object-fit:cover;flex:none;background:var(--nw-surface-2)}
+.nw-preview-meta{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1;font-size:11px;color:var(--nw-muted)}
 .nw-preview-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nw-compose-actions{display:flex;align-items:center;gap:12px;margin-left:auto}
-.nw-kbd{font-size:11.5px;letter-spacing:.02em;color:color-mix(in srgb,var(--dsw-alias-label-primary) 68%,transparent);white-space:nowrap}
-.nw-add{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:none;border-radius:999px;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background-color .15s ease}
+.nw-kbd{font-size:12px;letter-spacing:.02em;color:color-mix(in srgb,var(--nw-ink) 68%,transparent);white-space:nowrap}
+.nw-add{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border:none;border-radius:999px;background:var(--nw-project-accent);color:var(--nw-on-accent);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background-color .15s ease}
+.nw-add:hover:not(:disabled){background:color-mix(in srgb,var(--nw-project-accent) 86%,var(--dsw-alias-label-primary))}
 .nw-add:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
 .nw-add:disabled{background:var(--dsw-alias-button-primary-dimmed);cursor:default}
-.nw-add:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-add:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
 
 .nw-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));grid-auto-rows:1fr;align-items:stretch}
-.nw-note{position:relative;display:flex;flex-direction:column;gap:10px;height:100%;min-height:248px;overflow:hidden;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--nw-accent) 42%,var(--dsw-alias-bg-layer-1));box-sizing:border-box}
+.nw-note{position:relative;display:flex;flex-direction:column;gap:12px;height:100%;min-height:240px;overflow:hidden;padding:16px;border-radius:20px;border:.5px solid var(--nw-line-soft);background:var(--nw-surface);background:color-mix(in srgb,var(--nw-accent) 42%,var(--nw-surface));box-sizing:border-box}
 .nw-note-editing{height:auto;overflow:visible}
 .nw-note-menu-open{z-index:7}
-.nw-note:hover{border-color:var(--dsw-alias-border-l2)}
-.nw-note-editing:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.nw-note:hover{border-color:var(--nw-line)}
+.nw-note-editing:focus-within{outline:2px solid var(--nw-focus);outline-offset:2px}
 .nw-note-body{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0;overflow:hidden}
-.nw-note-tag{font-size:12px;font-weight:600;letter-spacing:.04em;color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nw-note-text{display:-webkit-box;margin:0;font-size:16px;line-height:1.72;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary);overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:4;max-height:calc(1.72em * 4)}
-.nw-note-thumb{display:block;width:96px;height:96px;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);flex:none}
+.nw-note-tag{font-size:12px;font-weight:600;letter-spacing:.04em;color:color-mix(in srgb,var(--nw-ink) 84%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-note-text{display:-webkit-box;margin:0;font-size:15px;line-height:1.72;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--nw-ink);overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:4;max-height:calc(1.72em * 4)}
+.nw-note-thumb{display:block;width:96px;height:96px;border-radius:12px;overflow:hidden;border:.5px solid var(--nw-line-soft);background:var(--nw-surface-2);flex:none}
 .nw-note-thumb img{display:block;width:100%;height:100%;object-fit:cover}
-.nw-note-thumb:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-note-image-missing,.nw-edit-image-missing{display:flex;align-items:center;justify-content:center;gap:6px;padding:8px;box-sizing:border-box;overflow:hidden;border-radius:12px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:color-mix(in srgb,var(--dsw-alias-label-primary) 70%,transparent);font-size:11px;text-align:center}
+.nw-note-thumb:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-note-image-missing,.nw-edit-image-missing{display:flex;align-items:center;justify-content:center;gap:8px;padding:8px;box-sizing:border-box;overflow:hidden;border-radius:12px;border:.5px dashed var(--nw-line);background:var(--nw-surface-2);color:color-mix(in srgb,var(--nw-ink) 70%,transparent);font-size:11px;text-align:center}
 .nw-note-image-missing{width:96px;height:96px;flex:none}
-.nw-note-image-missing-icon{width:32px;height:32px;padding:0;gap:0;border-radius:8px}
+.nw-note-image-missing-icon{width:32px;height:32px;padding:0;gap:0;border-radius:10px}
 .nw-note-image-missing-icon span{display:none}
 .nw-note-image-missing-large{width:100%;height:80px;flex:none}
 .nw-edit-image-missing{width:100%;min-height:80px}
-.nw-note:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-note-link{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0;font-size:12px;color:var(--dsw-alias-link);text-decoration:none;padding:2px 0}
+.nw-note:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-note-link{display:inline-flex;align-items:center;gap:8px;max-width:100%;min-width:0;font-size:12px;color:var(--nw-link);text-decoration:none;padding:4px 0}
 .nw-note-link:hover{text-decoration:underline}
-.nw-note-link:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}
+.nw-note-link:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px;border-radius:10px}
 .nw-note-link-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nw-note-editor{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0}
-.nw-edit-input{display:block;width:100%;box-sizing:border-box;min-height:82px;padding:0;border:none;outline:none;background:transparent;resize:vertical;font-family:inherit;font-size:15px;line-height:1.7;color:var(--dsw-alias-label-primary)}
+.nw-edit-input{display:block;width:100%;box-sizing:border-box;min-height:80px;padding:0;border:none;outline:none;background:transparent;resize:vertical;font-family:inherit;font-size:15px;line-height:1.7;color:var(--nw-ink)}
 .nw-edit-input:focus-visible{outline:none}
-.nw-edit-tag{width:100%;box-sizing:border-box;height:26px;padding:0;border:none;border-bottom:.5px solid var(--dsw-alias-border-l2);background:transparent;font-family:inherit;font-size:12px;color:var(--dsw-alias-label-secondary)}
-.nw-edit-tag::placeholder{color:var(--dsw-alias-label-tertiary);opacity:1}
-.nw-edit-tag:focus-visible{outline:none;border-bottom-color:var(--dsw-alias-brand-primary)}
-.nw-edit-link{width:100%;box-sizing:border-box;height:26px;padding:0;border:none;border-bottom:.5px solid var(--dsw-alias-border-l2);background:transparent;font-family:inherit;font-size:12px;color:var(--dsw-alias-label-secondary)}
-.nw-edit-link::placeholder{color:var(--dsw-alias-label-tertiary);opacity:1}
-.nw-edit-link:focus-visible{outline:none;border-bottom-color:var(--dsw-alias-brand-primary)}
-.nw-edit-image{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:6px;border-radius:10px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
-.nw-edit-image img{display:block;width:100%;max-height:180px;height:auto;object-fit:contain;border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
-.nw-edit-image-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
-.nw-edit-palette{display:flex;align-items:center;gap:4px;padding-top:2px}
-.nw-note-foot{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 72%,transparent)}
+.nw-edit-tag{width:100%;box-sizing:border-box;height:32px;padding:0;border:none;border-bottom:.5px solid var(--nw-line);background:transparent;font-family:inherit;font-size:12px;color:var(--nw-muted)}
+.nw-edit-tag::placeholder{color:var(--nw-muted);opacity:1}
+.nw-edit-tag:focus-visible{outline:none;border-bottom-color:var(--nw-focus)}
+.nw-edit-link{width:100%;box-sizing:border-box;height:32px;padding:0;border:none;border-bottom:.5px solid var(--nw-line);background:transparent;font-family:inherit;font-size:12px;color:var(--nw-muted)}
+.nw-edit-link::placeholder{color:var(--nw-muted);opacity:1}
+.nw-edit-link:focus-visible{outline:none;border-bottom-color:var(--nw-focus)}
+.nw-edit-image{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:8px;border-radius:10px;border:.5px dashed var(--nw-line);background:var(--nw-surface)}
+.nw-edit-image img{display:block;width:100%;max-height:180px;height:auto;object-fit:contain;border-radius:10px;background:var(--nw-surface-2)}
+.nw-edit-image-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.nw-edit-palette{display:flex;align-items:center;gap:4px;padding-top:4px}
+.nw-note-foot{margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:color-mix(in srgb,var(--nw-ink) 72%,transparent)}
 .nw-note-time{flex:none}
 .nw-note-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px;flex-wrap:wrap;opacity:.55;transition:opacity .12s ease}
 .nw-note:hover .nw-note-actions,.nw-note:focus-within .nw-note-actions{opacity:1}
-.nw-confirm-text{font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent)}
-.nw-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:none;border-radius:8px;background:transparent;color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);cursor:pointer}
-.nw-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.nw-iconbtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.nw-mini{height:26px;padding:0 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11px;cursor:pointer}
-.nw-mini:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
-.nw-mini:disabled{opacity:.6;cursor:default}
-.nw-toolbar .nw-mini{height:32px;min-height:32px;padding:0 12px;white-space:nowrap;flex:none;gap:6px;display:inline-flex;align-items:center;justify-content:center;line-height:1}
-.nw-select-toggle{min-width:max-content;padding:0 14px;gap:8px}
-.nw-mini-primary{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base)}
-.nw-mini-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
+.nw-confirm-text{font-size:12px;color:color-mix(in srgb,var(--nw-ink) 84%,transparent)}
+.nw-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:none;border-radius:10px;background:transparent;color:color-mix(in srgb,var(--nw-ink) 84%,transparent);cursor:pointer}
+.nw-iconbtn:hover{background:var(--nw-hover);color:var(--nw-ink)}
+.nw-iconbtn:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
+.nw-mini{height:28px;padding:0 12px;border-radius:999px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:12px;cursor:pointer}
+.nw-mini:hover:not(:disabled){background:var(--nw-hover)}
+.nw-mini:disabled{opacity:.5;cursor:not-allowed}
+.nw-mini:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-toolbar .nw-mini{height:32px;min-height:32px;padding:0 12px;white-space:nowrap;flex:none;gap:8px;display:inline-flex;align-items:center;justify-content:center;line-height:1}
+.nw-select-toggle{min-width:max-content;padding:0 12px;gap:8px}
+.nw-mini-primary{background:var(--nw-project-accent);border-color:var(--nw-project-accent);color:var(--nw-on-accent)}
+.nw-mini-primary:hover:not(:disabled){background:color-mix(in srgb,var(--nw-project-accent) 86%,var(--dsw-alias-label-primary))}
 .nw-mini-danger{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-secondary)}
 .nw-mini-danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
 
 /* v1.2.0: settings dialog, folders, reminders, category history */
-.nw-settings-backdrop{position:fixed;inset:0;z-index:70;display:flex;align-items:flex-start;justify-content:center;padding:64px 16px 24px;box-sizing:border-box;overflow:auto;background:color-mix(in srgb,var(--dsw-alias-bg-base) 34%,transparent)}
-.nw-settings{width:min(540px,100%);max-height:calc(100vh - 96px);overflow:auto;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;padding:16px 18px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 18px 48px rgba(0,0,0,.18)}
-.nw-settings-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.nw-settings-title{margin:0;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary)}
-.nw-settings-body{display:flex;flex-direction:column;gap:14px}
-.nw-set-section{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent)}
-.nw-set-section-title{font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--dsw-alias-label-primary)}
-.nw-set-row{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dsw-alias-label-primary);cursor:pointer;min-height:22px}
-.nw-set-row input[type="checkbox"]{width:14px;height:14px;flex:none;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
+.nw-settings-backdrop{position:fixed;inset:0;z-index:70;display:flex;align-items:flex-start;justify-content:center;padding:24px 16px;box-sizing:border-box;overflow:auto;background:var(--nw-scrim)}
+.nw-settings{width:min(540px,100%);max-height:calc(100vh - 48px);overflow:auto;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:20px;border:.5px solid var(--nw-line-soft);background:var(--nw-surface);box-shadow:0 18px 48px rgba(0,0,0,.18)}
+.nw-settings-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.nw-settings-title{margin:0;font-size:15px;font-weight:600;color:var(--nw-ink)}
+.nw-settings-body{display:flex;flex-direction:column;gap:12px}
+.nw-set-section{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface-2) 55%,transparent)}
+.nw-set-section-title{font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--nw-ink)}
+.nw-set-row{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--nw-ink);cursor:pointer;min-height:28px}
+.nw-set-row input[type="checkbox"]{width:14px;height:14px;flex:none;accent-color:var(--nw-focus);cursor:pointer}
 .nw-set-row:has(input:disabled){opacity:.5;cursor:default}
-.nw-set-inline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
-.nw-set-inline select{height:26px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px}
-.nw-set-range{width:150px;accent-color:var(--dsw-alias-brand-primary)}
-.nw-set-val{min-width:36px;font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}
-.nw-set-hint{margin:0;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}
-.nw-set-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding-top:2px}
+.nw-set-inline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;color:var(--nw-muted)}
+.nw-set-inline select{height:32px;padding:0 8px;border-radius:10px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:13px}
+.nw-set-range{width:150px;accent-color:var(--nw-focus)}
+.nw-set-val{min-width:36px;font-variant-numeric:tabular-nums;font-size:12px;color:var(--nw-muted)}
+.nw-set-hint{margin:0;font-size:11px;line-height:1.6;color:var(--nw-muted)}
+.nw-set-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-top:8px}
 .nw-set-foot-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
 /* v1.3.0: top folder chips, chip/card menus, folder dialogs */
-.nw-chips-wrap{position:relative;display:flex;flex-direction:column;gap:6px;min-width:0}
-.nw-chips-row{display:flex;align-items:center;gap:6px;min-width:0}
-.nw-chips-scroll{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;padding:4px 0;scrollbar-width:none;-ms-overflow-style:none}
+.nw-chips-wrap{position:relative;display:flex;flex-direction:column;gap:8px;min-width:0}
+.nw-chips-row{display:flex;align-items:center;gap:8px;min-width:0}
+.nw-chips-scroll{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;padding:4px 0;scrollbar-width:none;-ms-overflow-style:none}
 .nw-chips-scroll::-webkit-scrollbar{display:none;width:0;height:0}
-.nw-chip{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;height:32px;padding:0 11px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer}
-.nw-chip:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.nw-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-chip[aria-pressed="true"]{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base)}
-.nw-chip-count{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--dsw-alias-label-primary) 62%,transparent)}
-.nw-chip[aria-pressed="true"] .nw-chip-count{color:color-mix(in srgb,var(--dsw-alias-bg-base) 70%,transparent)}
-.nw-chip-add{flex:0 0 auto;width:32px;padding:0;justify-content:center;font-size:18px;font-weight:500}
+.nw-chip{flex:0 0 auto;display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:999px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:12px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer}
+.nw-chip:hover{background:var(--nw-hover)}
+.nw-chip:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-chip[aria-pressed="true"]{background:var(--nw-project-accent);border-color:var(--nw-project-accent);color:var(--nw-on-accent)}
+.nw-chip-count{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--nw-ink) 62%,transparent)}
+.nw-chip[aria-pressed="true"] .nw-chip-count{color:color-mix(in srgb,var(--nw-on-accent) 70%,transparent)}
+.nw-chip-add{flex:0 0 auto;width:32px;padding:0;justify-content:center;font-size:20px;font-weight:500}
 .nw-chip-create{display:flex;align-items:center;flex:0 0 auto}
-.nw-chip-input{width:150px;max-width:42vw;height:32px;box-sizing:border-box;padding:0 10px;border-radius:999px;border:.5px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px}
-.nw-chip-input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.nw-chip-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:45;display:flex;flex-direction:column;gap:2px;min-width:180px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:4px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 14px 38px rgba(0,0,0,.18)}
-.nw-menu-item{display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 10px;box-sizing:border-box;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;text-align:left;cursor:pointer}
-.nw-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.nw-menu-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-chip-input{width:150px;max-width:42vw;height:32px;box-sizing:border-box;padding:0 12px;border-radius:999px;border:.5px solid var(--nw-focus);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:13px}
+.nw-chip-input:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
+.nw-chip-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:45;display:flex;flex-direction:column;gap:4px;min-width:180px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:4px;border-radius:12px;border:.5px solid var(--nw-line-soft);background:var(--nw-surface);box-shadow:0 14px 38px rgba(0,0,0,.18)}
+.nw-menu-item{display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 12px;box-sizing:border-box;border:none;border-radius:10px;background:transparent;color:var(--nw-ink);font-family:inherit;font-size:13px;text-align:left;cursor:pointer}
+.nw-menu-item:hover{background:var(--nw-hover)}
+.nw-menu-item:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
 .nw-menu-item-danger{color:var(--dsw-alias-state-error-primary)}
-.nw-menu-title{padding:4px 10px 2px;font-size:11.5px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nw-note-menu{position:absolute;right:10px;bottom:10px;z-index:6;display:flex;flex-direction:column;gap:2px;min-width:150px;max-width:calc(100% - 20px);box-sizing:border-box;padding:4px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 10px 24px -12px rgba(0,0,0,.45)}
-.nw-dialog-backdrop{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;overflow:auto;background:color-mix(in srgb,var(--dsw-alias-bg-base) 38%,transparent)}
-.nw-dialog{width:min(360px,100%);box-sizing:border-box;display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:18px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);box-shadow:0 18px 48px rgba(0,0,0,.22)}
-.nw-dialog-title{margin:0;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
-.nw-dialog-text{margin:0;font-size:12.5px;line-height:1.7;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
-.nw-dialog-error{margin:0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
-.nw-dialog-form{display:flex;flex-direction:column;gap:10px}
-.nw-dialog-input{height:32px;box-sizing:border-box;padding:0 10px;border-radius:9px;border:.5px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px}
-.nw-dialog-input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.nw-dialog-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:2px}
-.nw-move-options{display:flex;flex-direction:column;gap:6px}
-.nw-move-option{display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:0 10px;box-sizing:border-box;border-radius:10px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12.5px;text-align:left;cursor:pointer}
-.nw-move-option:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.nw-move-option:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.nw-move-option[aria-checked="true"]{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,var(--dsw-alias-bg-layer-1))}
+.nw-menu-title{padding:4px 12px;font-size:12px;color:var(--nw-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-note-menu{position:absolute;right:8px;bottom:8px;z-index:6;display:flex;flex-direction:column;gap:4px;min-width:150px;max-width:calc(100% - 16px);box-sizing:border-box;padding:4px;border-radius:12px;border:.5px solid var(--nw-line-soft);background:var(--nw-surface);box-shadow:0 10px 24px -12px rgba(0,0,0,.45)}
+.nw-dialog-backdrop{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;overflow:auto;background:var(--nw-scrim)}
+.nw-dialog{width:min(360px,100%);box-sizing:border-box;display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:20px;border:.5px solid var(--nw-line-soft);background:var(--nw-surface);box-shadow:0 18px 48px rgba(0,0,0,.22)}
+.nw-dialog-title{margin:0;font-size:15px;font-weight:600;color:var(--nw-ink)}
+.nw-dialog-text{margin:0;font-size:13px;line-height:1.7;color:var(--nw-muted);overflow-wrap:anywhere}
+.nw-dialog-error{margin:0;display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
+.nw-dialog-form{display:flex;flex-direction:column;gap:12px}
+.nw-dialog-input{height:32px;box-sizing:border-box;padding:0 12px;border-radius:10px;border:.5px solid var(--nw-focus);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:13px}
+.nw-dialog-input:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
+.nw-dialog-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:8px}
+.nw-move-options{display:flex;flex-direction:column;gap:8px}
+.nw-move-option{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;padding:0 12px;box-sizing:border-box;border-radius:10px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:13px;text-align:left;cursor:pointer}
+.nw-move-option:hover{background:var(--nw-hover)}
+.nw-move-option:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
+.nw-move-option[aria-checked="true"]{border-color:var(--nw-focus);background:color-mix(in srgb,var(--nw-focus) 10%,var(--nw-surface))}
 .nw-move-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nw-move-count{margin-left:auto;flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.nw-move-count{margin-left:auto;flex:none;font-size:11px;color:var(--nw-muted);font-variant-numeric:tabular-nums}
 .nw-move-create{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .nw-move-create .nw-chip-input{flex:1 1 140px;width:auto;max-width:none}
-.nw-dialog-actions .nw-mini,.nw-move-create .nw-mini,.nw-empty .nw-mini{height:32px;padding:0 14px}
-.nw-select-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);font-size:12px;color:var(--dsw-alias-label-primary)}
-.nw-select-bar select{height:26px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px}
-.nw-note-select{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 80%,transparent);cursor:pointer}
-.nw-select-check{width:14px;height:14px;flex:none;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
-.nw-note-folder{display:inline-flex;align-items:center;gap:5px;align-self:flex-start;max-width:100%;padding:1px 8px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 55%,transparent);font-size:11px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 82%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nw-note-remind{display:inline-flex;align-items:center;gap:5px;align-self:flex-start;max-width:100%;padding:2px 8px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 55%,transparent);font-size:11.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 78%,transparent)}
-.nw-note-remind-due{border-color:var(--dsw-alias-state-error-secondary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-state-error-primary)}
-.nw-remind-field{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 9px;border-radius:9px;border:.5px solid color-mix(in srgb,var(--dsw-alias-label-primary) 16%,transparent);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 45%,transparent);color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent)}
-.nw-remind-field:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px;background:var(--dsw-alias-bg-layer-1)}
-.nw-remind-input{width:148px;min-width:96px;border:none;outline:none;background:transparent;font-family:inherit;font-size:12px;color:var(--dsw-alias-label-primary)}
-.nw-edit-remind{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary)}
-.nw-edit-remind input[type="datetime-local"]{height:26px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11.5px}
-.nw-cat-history{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-top:8px}
-.nw-cat-label{font-size:11px;color:var(--dsw-alias-label-tertiary)}
-.nw-cat-chip{height:24px;padding:0 9px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 60%,transparent);color:color-mix(in srgb,var(--dsw-alias-label-primary) 84%,transparent);font-family:inherit;font-size:11.5px;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nw-cat-chip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.nw-cat-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-dialog-actions .nw-mini,.nw-move-create .nw-mini,.nw-empty .nw-mini{height:32px;padding:0 12px}
+.nw-select-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 12px;border-radius:12px;border:.5px solid var(--nw-line);background:var(--nw-surface);font-size:12px;color:var(--nw-ink)}
+.nw-select-bar select{height:32px;padding:0 8px;border-radius:10px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:13px}
+.nw-note-select{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;font-size:12px;color:color-mix(in srgb,var(--nw-ink) 80%,transparent);cursor:pointer}
+.nw-select-check{width:14px;height:14px;flex:none;accent-color:var(--nw-focus);cursor:pointer}
+.nw-note-folder{display:inline-flex;align-items:center;gap:4px;align-self:flex-start;max-width:100%;padding:4px 8px;border-radius:999px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface) 55%,transparent);font-size:11px;color:color-mix(in srgb,var(--nw-ink) 82%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-note-remind{display:inline-flex;align-items:center;gap:4px;align-self:flex-start;max-width:100%;padding:4px 8px;border-radius:999px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface) 55%,transparent);font-size:12px;color:color-mix(in srgb,var(--nw-ink) 78%,transparent)}
+.nw-note-remind-due{border-color:var(--dsw-alias-state-error-secondary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,var(--nw-surface));color:var(--dsw-alias-state-error-primary)}
+.nw-remind-field{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:10px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface) 45%,transparent);color:color-mix(in srgb,var(--nw-ink) 84%,transparent)}
+.nw-remind-field:focus-within{outline:2px solid var(--nw-focus);outline-offset:1px;background:var(--nw-surface)}
+.nw-remind-input{width:148px;min-width:96px;border:none;outline:none;background:transparent;font-family:inherit;font-size:12px;color:var(--nw-ink)}
+.nw-edit-remind{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--nw-muted)}
+.nw-edit-remind input[type="datetime-local"]{height:32px;padding:0 8px;border-radius:10px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:12px}
+.nw-cat-history{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px}
+.nw-cat-label{font-size:11px;color:var(--nw-muted)}
+.nw-cat-chip{height:28px;padding:0 12px;border-radius:999px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface) 60%,transparent);color:color-mix(in srgb,var(--nw-ink) 84%,transparent);font-family:inherit;font-size:12px;cursor:pointer;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nw-cat-chip:hover{background:var(--nw-hover);color:var(--nw-ink)}
+.nw-cat-chip:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
 
 /* v1.2.0-C: settings page (settings.section), first-use guide, ZIP dialogs */
-.nw-settings-page{display:flex;flex-direction:column;gap:12px;max-width:640px;padding:2px 2px 20px;box-sizing:border-box;color:var(--dsw-alias-label-primary);font-size:12.5px}
+.nw-settings-page{display:flex;flex-direction:column;gap:12px;max-width:640px;padding:4px 4px 24px;box-sizing:border-box;color:var(--nw-ink);font-size:13px}
 .nw-settings-page-head{display:flex;flex-direction:column;gap:4px}
-.nw-settings-page-title{margin:0;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary)}
-.nw-settings-page-sub{margin:0;font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
-.nw-settings-dialog-note{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent)}
-.nw-settings-dialog-text{margin:0;font-size:12.5px;line-height:1.7;color:var(--dsw-alias-label-primary)}
+.nw-settings-page-title{margin:0;font-size:15px;font-weight:600;color:var(--nw-ink)}
+.nw-settings-page-sub{margin:0;font-size:12px;line-height:1.65;color:var(--nw-muted)}
+.nw-settings-dialog-note{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--nw-surface-2) 55%,transparent)}
+.nw-settings-dialog-text{margin:0;font-size:13px;line-height:1.7;color:var(--nw-ink)}
 .nw-onboarding-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:4px}
-.nw-onboarding-points{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary)}
-.nw-radio-row{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-primary);cursor:pointer}
-.nw-radio-row input[type="radio"]{margin-top:3px;flex:none;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
-.nw-radio-text{display:flex;flex-direction:column;gap:2px;min-width:0}
-.nw-radio-hint{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}
-.nw-import-file{display:flex;align-items:center;gap:8px;min-width:0;padding:7px 9px;border-radius:10px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);font-size:11.5px;color:var(--dsw-alias-label-secondary)}
+.nw-onboarding-points{margin:0;padding-left:24px;display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:1.65;color:var(--nw-muted)}
+.nw-radio-row{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.6;color:var(--nw-ink);cursor:pointer}
+.nw-radio-row input[type="radio"]{margin-top:4px;flex:none;accent-color:var(--nw-focus);cursor:pointer}
+.nw-radio-text{display:flex;flex-direction:column;gap:4px;min-width:0}
+.nw-radio-hint{font-size:11px;line-height:1.6;color:var(--nw-muted)}
+.nw-import-file{display:flex;align-items:center;gap:8px;min-width:0;padding:8px 12px;border-radius:10px;border:.5px dashed var(--nw-line);background:var(--nw-surface);font-size:12px;color:var(--nw-muted)}
 .nw-import-file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.nw-import-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:2px}
+.nw-import-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:8px}
 
-.nw-note-image{display:block;width:100%;border-radius:12px;overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2)}
+.nw-note-image{display:block;width:100%;border-radius:12px;overflow:hidden;border:.5px solid var(--nw-line-soft);background:var(--nw-surface-2)}
 .nw-note-image img{display:block;width:100%;max-height:120px;height:auto;object-fit:cover}
-.nw-note-image:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-note-thumb-icon{border-radius:8px}
+.nw-note-image:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-note-thumb-icon{border-radius:10px}
 
-.nw-banner{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:12px;font-size:12px;line-height:1.6;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
-.nw-banner-error{border-color:var(--dsw-alias-state-error-secondary);background:var(--dsw-alias-bg-layer-1);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,var(--dsw-alias-bg-layer-1))}
+.nw-banner{display:flex;align-items:flex-start;gap:12px;padding:12px;border-radius:12px;font-size:12px;line-height:1.6;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink)}
+.nw-banner-error{border-color:var(--dsw-alias-state-error-secondary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,var(--nw-surface));color:var(--dsw-alias-state-error-primary)}
+.nw-banner-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;width:20px;height:20px;border-radius:999px;color:var(--dsw-alias-state-error-primary)}
 .nw-banner-text{flex:1;min-width:0;overflow-wrap:anywhere}
-.nw-loading{display:flex;align-items:center;justify-content:center;gap:10px;padding:44px 0;font-size:12px;color:var(--dsw-alias-label-secondary)}
-.nw-spinner{display:inline-block;width:14px;height:14px;border-radius:50%;border:2px solid var(--dsw-alias-border-l2);border-top-color:var(--dsw-alias-brand-primary);animation:nw-spin .9s linear infinite;flex:none}
-.nw-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:52px 20px;border-radius:22px;border:.5px dashed var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);text-align:center}
-.nw-empty-title{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
-.nw-empty-hint{max-width:420px;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-secondary)}
+.nw-loading{display:flex;align-items:center;justify-content:center;gap:12px;padding:24px 0;font-size:12px;color:var(--nw-muted)}
+.nw-spinner{display:inline-block;width:14px;height:14px;border-radius:999px;border:2px solid var(--nw-line);border-top-color:var(--nw-focus);animation:nw-spin .9s linear infinite;flex:none}
+.nw-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:24px 16px;border-radius:20px;border:.5px dashed var(--nw-line);background:var(--nw-surface);text-align:center}
+.nw-empty-title{font-size:15px;font-weight:600;color:var(--nw-ink)}
+.nw-empty-hint{max-width:420px;font-size:12px;line-height:1.7;color:var(--nw-muted)}
 .nw-page-foot{display:flex;align-items:flex-end;justify-content:flex-start;margin-top:auto;padding-top:8px}
 .nw-signature-wrap{position:relative;display:inline-flex;flex-direction:column;align-items:flex-start;gap:8px;max-width:100%}
-.nw-signature{display:inline-flex;align-items:center;gap:7px;height:24px;padding:0 2px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11.5px;letter-spacing:.02em;opacity:.55;cursor:pointer;user-select:none}
+.nw-signature{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 4px;border:none;border-radius:10px;background:transparent;color:var(--nw-accent-ink);font-family:inherit;font-size:12px;letter-spacing:.02em;opacity:.55;cursor:pointer;user-select:none}
 .nw-signature:hover,.nw-signature:focus-visible{opacity:1}
-.nw-signature:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.nw-signature-mark{width:10px;height:10px;border-radius:3px;background:#5B57F0;flex:none}
-.nw-dark .nw-signature-mark{background:#8B87FF}
-.nw-signature-pop{display:flex;align-items:center;gap:12px;max-width:min(100%,360px);box-sizing:border-box;padding:10px 12px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
+.nw-signature:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-signature-mark{width:10px;height:10px;border-radius:3px;background:var(--nw-project-accent);flex:none}
+.nw-signature-pop{display:flex;align-items:center;gap:12px;max-width:min(100%,360px);box-sizing:border-box;padding:12px;border-radius:12px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink)}
 .nw-signature-quote{margin:0;font-size:13px;line-height:1.6;min-width:0;overflow-wrap:anywhere}
 .nw-signature-close{flex:none}
 .nw-motion .nw-signature{transition:opacity .12s ease}
@@ -1835,44 +2061,86 @@ window.__ModuleLoader__.load({
 .nw-motion .nw-compose:focus-within{animation:nw-focus .25s ease-out}
 @keyframes nw-note-in{from{opacity:0;transform:translateY(6px) scale(.99)}to{opacity:1;transform:none}}
 @keyframes nw-pop{0%{transform:scale(.82)}100%{transform:scale(1)}}
-@keyframes nw-focus{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent)}100%{box-shadow:0 0 0 6px transparent}}
-@media (max-width:720px){.nw-page{padding:20px 16px 36px}.nw-compose{padding:16px 16px 12px;border-radius:18px}.nw-compose-input{min-height:76px;font-size:16.5px}.nw-compose-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-kbd{display:none}.nw-tag-input{width:104px}.nw-grid{grid-template-columns:1fr}.nw-count{font-size:11px}}
-@media (max-width:420px){.nw-toolbar .nw-search{flex-basis:100%}.nw-toolbar .nw-filter{flex:1 1 46%;min-width:0}.nw-toolbar-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-select-toggle{min-width:max-content;padding:0 12px}.nw-chip{padding:0 10px}.nw-chip-input{width:132px;max-width:46vw}.nw-dialog{padding:12px 14px}.nw-move-option{min-height:42px}}
+@keyframes nw-focus{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--nw-focus) 40%,transparent)}100%{box-shadow:0 0 0 6px transparent}}
+@media (max-width:720px){.nw-page{padding:16px}.nw-compose{padding:16px 16px 12px;border-radius:20px}.nw-compose-input{min-height:76px;font-size:15px}.nw-compose-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-kbd{display:none}.nw-tag-input{width:104px}.nw-grid{grid-template-columns:1fr}.nw-count{font-size:11px}}
+@media (max-width:420px){.nw-toolbar .nw-search{flex-basis:100%}.nw-toolbar .nw-filter{flex:1 1 46%;min-width:0}.nw-toolbar-actions{margin-left:0;width:100%;justify-content:flex-end}.nw-select-toggle{min-width:max-content;padding:0 12px}.nw-chip{padding:0 12px}.nw-chip-input{width:132px;max-width:46vw}.nw-dialog{padding:12px 16px}.nw-move-option{min-height:44px}}
 @media (prefers-reduced-motion:reduce){.nw-swatch,.nw-note,.nw-note-actions,.nw-compose,.nw-add,.nw-spinner{transition:none;animation:none}.nw-motion .nw-note{animation:none;transform:none}.nw-motion .nw-note:hover{transform:none}.nw-motion .nw-compose:focus-within{animation:none}.nw-motion .nw-swatch-selected::before{animation:none}.nw-motion .nw-add:not(:disabled):active{transform:none}.nw-motion .nw-swatch:hover{transform:none}.nw-motion .nw-signature{transition:none}.nw-motion .nw-signature-pop{animation:none}}
+
+/* B1: native form controls inside settings/search/filter get the same ring. */
+.nw-set-inline select:focus-visible,.nw-select-bar select:focus-visible,
+.nw-edit-remind input:focus-visible,.nw-set-range:focus-visible,
+.nw-set-row input:focus-visible,.nw-radio-row input:focus-visible,
+.nw-select-check:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
+.nw-dialog-error svg,.nw-banner-icon svg{flex:none}
+.nw-banner-error .nw-banner-text{color:var(--dsw-alias-state-error-primary)}
+
+/* B1 safety net lives at the top of the sheet so focused-parent rules can
+   override it; every focusable control still gets a ring by default. */
+
+/* B2 disabled-state visuals: one predictable dimming rule for every control,
+   while never letting a disabled control show a hover/active affordance. */
+.nw-root button:disabled,.nw-root input:disabled,.nw-root select:disabled,.nw-root textarea:disabled,
+.nw-settings-page button:disabled,.nw-settings-page input:disabled,.nw-settings-page select:disabled,
+.nw-ov-layer button:disabled{opacity:.5;cursor:not-allowed}
+.nw-add:disabled,.nw-mini:disabled,.nw-iconbtn:disabled,.nw-motion-toggle:disabled,.nw-chip:disabled,
+.nw-cat-chip:disabled,.nw-ov-btn:disabled,.nw-attach-btn:disabled,.nw-swatch:disabled{background-image:none}
 `
 
     // The reminder surface lives in `shell.overlay`, a fixed layer owned by the
     // host frame. The layer is click-through; only the reminder card opts into
     // pointer events, so the rest of the Harness UI stays usable. No global
     // stylesheet is injected and nothing is written to document.body/head.
-    const OVERLAY_CSS = `
-.nw-ov-layer{position:fixed;inset:0;z-index:950;display:flex;align-items:flex-end;justify-content:flex-end;padding:18px;box-sizing:border-box;pointer-events:none}
+    const OVERLAY_CSS = NW_TOKENS + `
+.nw-ov-layer{position:fixed;inset:0;z-index:950;display:flex;align-items:flex-end;justify-content:flex-end;padding:16px;box-sizing:border-box;pointer-events:none}
 .nw-ov-layer.nw-ov-banner{align-items:flex-start;justify-content:center}
-.nw-ov-card{pointer-events:auto;display:flex;flex-direction:column;gap:8px;width:min(330px,100%);max-height:min(62vh,440px);overflow:auto;box-sizing:border-box;padding:12px 14px;border-radius:16px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:0 14px 38px rgba(0,0,0,.22);font-size:12px;line-height:1.55}
+.nw-ov-card{pointer-events:auto;display:flex;flex-direction:column;gap:8px;width:min(330px,100%);max-height:min(62vh,440px);overflow:auto;box-sizing:border-box;padding:12px 16px;border-radius:20px;border:.5px solid var(--nw-line-soft);background:var(--nw-surface);color:var(--nw-ink);box-shadow:0 14px 38px rgba(0,0,0,.22);font-size:12px;line-height:1.55}
 .nw-ov-banner .nw-ov-card{width:min(480px,100%);max-height:min(42vh,320px)}
-.nw-ov-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.nw-ov-title{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary)}
-.nw-ov-count{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
-.nw-ov-list{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
-.nw-ov-item{display:flex;align-items:flex-start;gap:8px;padding:8px 9px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,var(--dsw-alias-brand-primary)) 7%,var(--dsw-alias-bg-layer-1))}
-.nw-ov-item-due{border-color:var(--dsw-alias-state-error-secondary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 9%,var(--dsw-alias-bg-layer-1))}
-.nw-ov-item-body{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
-.nw-ov-item-text{margin:0;font-size:12.5px;line-height:1.5;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.nw-ov-item-time{font-size:10.5px;color:color-mix(in srgb,var(--dsw-alias-label-primary) 66%,transparent)}
+.nw-ov-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.nw-ov-title{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--nw-ink)}
+.nw-ov-count{font-size:11px;color:var(--nw-muted);font-variant-numeric:tabular-nums}
+.nw-ov-list{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}
+.nw-ov-item{display:flex;align-items:flex-start;gap:8px;padding:8px 12px;border-radius:10px;border:.5px solid var(--nw-line);background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,var(--nw-focus)) 7%,var(--nw-surface))}
+.nw-ov-item-due{border-color:var(--dsw-alias-state-error-secondary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 9%,var(--nw-surface))}
+.nw-ov-item-body{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
+.nw-ov-item-text{margin:0;font-size:13px;line-height:1.5;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.nw-ov-item-time{font-size:11px;color:color-mix(in srgb,var(--nw-ink) 66%,transparent)}
 .nw-ov-item-due .nw-ov-item-time{color:var(--dsw-alias-state-error-primary)}
-.nw-ov-error{margin:0;font-size:11.5px;color:var(--dsw-alias-state-error-primary)}
+.nw-ov-error{margin:0;font-size:12px;color:var(--dsw-alias-state-error-primary)}
 .nw-ov-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
-.nw-ov-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:26px;padding:0 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:11.5px;cursor:pointer}
-.nw-ov-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.nw-ov-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.nw-ov-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:28px;padding:0 12px;border-radius:999px;border:.5px solid var(--nw-line);background:var(--nw-surface);color:var(--nw-ink);font-family:inherit;font-size:12px;cursor:pointer}
+.nw-ov-btn:hover{background:var(--nw-hover)}
+.nw-ov-btn:focus-visible{outline:2px solid var(--nw-focus);outline-offset:1px}
 .nw-ov-btn-primary{border-color:var(--dsw-alias-button-primary-fill);background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-bg-base)}
 .nw-ov-btn-primary:hover{background:var(--dsw-alias-button-primary-hover)}
-.nw-ov-btn:disabled{opacity:.6;cursor:default}
+.nw-ov-btn:disabled{opacity:.5;cursor:not-allowed}
 `
 
     function Styles() {
       return h('style', null, CSS)
     }
+
+    /**
+     * B2 error variant: host error colors, an icon, the message and one action.
+     * It reuses the existing banner (never a new card); `onRetry` is used for
+     * load failures, `onDismiss` for action failures that cannot be replayed.
+     */
+    function ErrorBanner(props) {
+      const t = props.t
+      return h('div', {
+        className: 'nw-banner nw-banner-error',
+        role: 'alert',
+        key: props.bannerKey,
+      },
+        h('span', { className: 'nw-banner-icon', 'aria-hidden': 'true' }, h(ErrorGlyph, { size: 14 })),
+        h('span', { className: 'nw-banner-text' }, props.text),
+        typeof props.onRetry === 'function'
+          ? h('button', { type: 'button', className: 'nw-mini', onClick: props.onRetry }, t('重试', 'Retry'))
+          : typeof props.onDismiss === 'function'
+            ? h('button', { type: 'button', className: 'nw-mini', onClick: props.onDismiss }, t('关闭', 'Dismiss'))
+            : null,
+      )
+    }
+
 
     // ---------------------------------------------------------------------------
     // Page pieces
@@ -2121,28 +2389,8 @@ window.__ModuleLoader__.load({
       }, [])
 
       function onKeyDown(event) {
-        if (event.key === 'Escape') {
-          event.preventDefault()
-          props.onClose()
-          return
-        }
-        if (event.key !== 'Tab') return
-        const root = event.currentTarget
-        if (!root || typeof root.querySelectorAll !== 'function') return
-        const items = Array.prototype.slice.call(root.querySelectorAll(
-          'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])',
-        ))
-        if (items.length === 0) return
-        const first = items[0]
-        const last = items[items.length - 1]
-        const active = typeof document !== 'undefined' ? document.activeElement : null
-        if (event.shiftKey === true && active === first) {
-          event.preventDefault()
-          if (last && typeof last.focus === 'function') last.focus()
-        } else if (event.shiftKey !== true && active === last) {
-          event.preventDefault()
-          if (first && typeof first.focus === 'function') first.focus()
-        }
+        if (event.key === 'Escape' && props.layerId !== undefined && !isTopDialogLayer(props.layerId)) return
+        handleDialogKeyDown(event, { onClose: props.onClose })
       }
 
       return h('div', {
@@ -2172,6 +2420,7 @@ window.__ModuleLoader__.load({
         t: t,
         title: t('重命名文件夹', 'Rename folder'),
         titleId: props.titleId,
+        layerId: DIALOG_LAYER_FOLDER_DIALOG,
         initialFocusRef: props.inputRef,
         onClose: props.onClose,
       },
@@ -2194,7 +2443,10 @@ window.__ModuleLoader__.load({
             onChange: function (event) { props.onChange(event.target.value) },
           }),
           props.error
-            ? h('p', { className: 'nw-dialog-error', role: 'alert' }, props.error)
+            ? h('p', { className: 'nw-dialog-error', role: 'alert' },
+                h(ErrorGlyph, { size: 13 }),
+                h('span', null, props.error),
+              )
             : null,
           h('div', { className: 'nw-dialog-actions' },
             h('button', {
@@ -2220,6 +2472,7 @@ window.__ModuleLoader__.load({
         t: t,
         title: t('删除文件夹？', 'Delete folder?'),
         titleId: props.titleId,
+        layerId: DIALOG_LAYER_FOLDER_DIALOG,
         initialFocusRef: props.cancelRef,
         onClose: props.onClose,
       },
@@ -2229,9 +2482,12 @@ window.__ModuleLoader__.load({
             '"' + props.folderName + '" has ' + props.count + ' note(s). After deleting, those notes move to "Uncategorized" — they are not deleted.',
           ),
         ),
-        props.error
-          ? h('p', { className: 'nw-dialog-error', role: 'alert' }, props.error)
-          : null,
+          props.error
+            ? h('p', { className: 'nw-dialog-error', role: 'alert' },
+                h(ErrorGlyph, { size: 13 }),
+                h('span', null, props.error),
+              )
+            : null,
         h('div', { className: 'nw-dialog-actions' },
           h('button', {
             type: 'button',
@@ -2265,6 +2521,7 @@ window.__ModuleLoader__.load({
         t: t,
         title: t('移动到文件夹', 'Move to folder'),
         titleId: props.titleId,
+        layerId: DIALOG_LAYER_MOVE,
         initialFocusRef: props.firstOptionRef,
         dialogRef: props.dialogRef,
         onClose: props.onClose,
@@ -2292,9 +2549,12 @@ window.__ModuleLoader__.load({
             )
           }),
         ),
-        props.error
-          ? h('p', { className: 'nw-dialog-error', role: 'alert' }, props.error)
-          : null,
+          props.error
+            ? h('p', { className: 'nw-dialog-error', role: 'alert' },
+                h(ErrorGlyph, { size: 13 }),
+                h('span', null, props.error),
+              )
+            : null,
         props.creating === true
           ? h('form', {
               className: 'nw-dialog-form nw-move-create',
@@ -2402,10 +2662,20 @@ window.__ModuleLoader__.load({
       const pending = props.pending || null
       const busy = pending !== null
       const confirmRef = React.useRef(null)
+      const cardRef = React.useRef(null)
+      const wasEditingRef = React.useRef(editing !== null)
       const editFileRef = React.useRef(null)
       const editColorRef = React.useRef(null)
       const [failedImage, setFailedImage] = React.useState('')
       const [failedEditImage, setFailedEditImage] = React.useState('')
+
+      // R12: cancelling (or finishing) an edit returns focus to the card that
+      // owns the editor, so keyboard focus is never dropped on the page body.
+      React.useEffect(function () {
+        const target = editFocusTarget(wasEditingRef.current, editing, cardRef.current)
+        if (target) target.focus()
+        wasEditingRef.current = editing !== null
+      }, [editing])
 
       React.useEffect(function () {
         if (props.confirming && confirmRef.current && typeof confirmRef.current.focus === 'function') {
@@ -2780,6 +3050,7 @@ window.__ModuleLoader__.load({
         : null
 
       return h('article', {
+        ref: cardRef,
         className: 'nw-note' + toneClass(tone) + (editing !== null ? ' nw-note-editing' : '') + (props.menuOpen === true ? ' nw-note-menu-open' : ''),
         style: toneStyle(tone),
         tabIndex: 0,
@@ -3058,9 +3329,19 @@ window.__ModuleLoader__.load({
       const draft = useSettingsDraft(props.settings)
       const busy = props.busy === true
 
+      function onKeyDown(event) {
+        // Esc closes only this dialog when it is the topmost surface; a
+        // reminder card above it keeps its own Escape.
+        if (event.key === 'Escape' && !isTopDialogLayer(DIALOG_LAYER_SETTINGS)) return
+        handleDialogKeyDown(event, { onClose: props.onClose })
+      }
+
       return h('div', {
         className: 'nw-settings-backdrop',
         onMouseDown: function (event) {
+          if (event.target === event.currentTarget) props.onClose()
+        },
+        onClick: function (event) {
           if (event.target === event.currentTarget) props.onClose()
         },
       },
@@ -3070,6 +3351,7 @@ window.__ModuleLoader__.load({
           role: 'dialog',
           'aria-modal': 'true',
           'aria-label': t('便签墙设置', 'Note wall settings'),
+          onKeyDown: onKeyDown,
         },
           h('div', { className: 'nw-settings-head' },
             h('h3', { className: 'nw-settings-title' }, t('便签墙设置', 'Note wall settings')),
@@ -3083,9 +3365,7 @@ window.__ModuleLoader__.load({
             }, h(CloseGlyph, { size: 14 })),
           ),
           props.error
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
-                h('span', { className: 'nw-banner-text' }, props.error),
-              )
+            ? h(ErrorBanner, { t: t, text: props.error })
             : null,
           props.notice
             ? h('div', { className: 'nw-banner nw-banner-success', role: 'status' },
@@ -3115,6 +3395,7 @@ window.__ModuleLoader__.load({
     function SettingsSection(props) {
       const ctx = props.ctx
       const t = useText(ctx)
+      const colorScheme = useColorScheme(ctx)
       const [settings, setSettings] = React.useState(function () {
         return normalizeClientSettings(
           props.initialSettings !== undefined ? props.initialSettings : settingsCache,
@@ -3206,7 +3487,7 @@ window.__ModuleLoader__.load({
       // (never document.head/body), so the form is styled on its own.
       return h(React.Fragment, null,
         h(Styles, { key: 'settings-styles' }),
-        h('div', { className: 'nw-settings-page', key: 'settings-page' },
+        h('div', { className: 'nw-settings-page' + (colorScheme === 'dark' ? ' nw-dark' : ''), key: 'settings-page' },
           h('div', { className: 'nw-settings-page-head' },
             h('h3', { className: 'nw-settings-page-title' }, t('便签墙设置', 'Note wall settings')),
             h('p', { className: 'nw-settings-page-sub' },
@@ -3217,16 +3498,13 @@ window.__ModuleLoader__.load({
             ),
           ),
           loadError
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
-                h('span', { className: 'nw-banner-text' },
-                  t('设置读取失败，已使用默认设置（新功能全部关闭）：', 'Could not read settings; using defaults (new features off): ') + loadError,
-                ),
-              )
+            ? h(ErrorBanner, {
+                t: t,
+                text: t('设置读取失败，已使用默认设置（新功能全部关闭）：', 'Could not read settings; using defaults (new features off): ') + loadError,
+              })
             : null,
           error
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
-                h('span', { className: 'nw-banner-text' }, error),
-              )
+            ? h(ErrorBanner, { t: t, text: error })
             : null,
           notice
             ? h('div', { className: 'nw-banner nw-banner-success', role: 'status' },
@@ -3343,9 +3621,7 @@ window.__ModuleLoader__.load({
             ),
           ),
           props.error
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert' },
-                h('span', { className: 'nw-banner-text' }, props.error),
-              )
+            ? h(ErrorBanner, { t: t, text: props.error })
             : null,
           h('div', { className: 'nw-import-actions' },
             h('button', {
@@ -3419,14 +3695,17 @@ window.__ModuleLoader__.load({
 
     function ReminderOverlay(props) {
       const t = useText(props && props.ctx)
+      const colorScheme = useColorScheme(props && props.ctx)
       const [settings, setSettings] = React.useState(function () { return settingsCache })
       const [due, setDue] = React.useState([])
       const [error, setError] = React.useState('')
       const tRef = React.useRef(t)
       const settingsRef = React.useRef(settings)
       const controllerRef = React.useRef(null)
+      const returnFocusRef = React.useRef(null)
       const aliveRef = React.useRef(true)
       const active = globalAlarmActive(settings)
+      const visible = active && due.length > 0
 
       React.useEffect(function () {
         tRef.current = t
@@ -3516,6 +3795,52 @@ window.__ModuleLoader__.load({
         }
       }, [active])
 
+      // R12: the reminder card is a non-modal overlay. Escape closes it only
+      // while it is the topmost surface, a click outside dismisses it, and the
+      // element that had focus before it appeared gets focus back afterwards.
+      React.useEffect(function () {
+        if (!visible) return function () {}
+        const target = typeof document !== 'undefined' ? document.activeElement : null
+        if (target && target !== (typeof document !== 'undefined' ? document.body : null)
+          && typeof target.focus === 'function') {
+          returnFocusRef.current = target
+        }
+        return function () {
+          const previous = returnFocusRef.current
+          returnFocusRef.current = null
+          if (previous && previous.isConnected !== false && typeof previous.focus === 'function') {
+            try { previous.focus() } catch (focusError) {}
+          }
+        }
+      }, [visible])
+
+      React.useEffect(function () {
+        if (!visible) return function () {}
+        const release = pushDialogLayer(DIALOG_LAYER_OVERLAY)
+        function onKeyDown(event) {
+          if (event.key !== 'Escape' || event.defaultPrevented) return
+          if (!isTopDialogLayer(DIALOG_LAYER_OVERLAY)) return
+          event.preventDefault()
+          dismissAll()
+        }
+        function onPointerDown(event) {
+          const target = event.target
+          if (target && typeof target.closest === 'function' && target.closest('[data-nw-overlay-card]')) return
+          dismissAll()
+        }
+        if (typeof document !== 'undefined') {
+          document.addEventListener('keydown', onKeyDown)
+          document.addEventListener('mousedown', onPointerDown)
+        }
+        return function () {
+          if (typeof document !== 'undefined') {
+            document.removeEventListener('keydown', onKeyDown)
+            document.removeEventListener('mousedown', onPointerDown)
+          }
+          release()
+        }
+      }, [visible])
+
       async function completeNote(note) {
         setError('')
         try {
@@ -3566,18 +3891,23 @@ window.__ModuleLoader__.load({
         setError('')
       }
 
-      if (!active || due.length === 0) return null
+      if (!visible) return null
       const banner = settings.globalAlarm.mode === 'banner'
       return h(React.Fragment, null,
         h('style', { key: 'reminder-css' }, OVERLAY_CSS),
         h('div', {
           key: 'reminder-layer',
-          className: 'nw-ov-layer' + (banner ? ' nw-ov-banner' : ''),
+          className: 'nw-ov-layer' + (banner ? ' nw-ov-banner' : '') + (colorScheme === 'dark' ? ' nw-dark' : ''),
           role: 'region',
           'aria-label': t('便签提醒', 'Note reminders'),
           'aria-live': 'polite',
         },
-          h('div', { className: 'nw-ov-card' },
+          h('div', {
+            className: 'nw-ov-card',
+            role: 'dialog',
+            'aria-label': t('便签提醒', 'Note reminders'),
+            'data-nw-overlay-card': '1',
+          },
             h('div', { className: 'nw-ov-head' },
               h('span', { className: 'nw-ov-title' },
                 h(ClockGlyph, { size: 14 }),
@@ -3628,6 +3958,7 @@ window.__ModuleLoader__.load({
       const [notes, setNotes] = React.useState([])
       const [limits, setLimits] = React.useState(DEFAULT_LIMITS)
       const [status, setStatus] = React.useState('loading')
+      const [loadingVisible, setLoadingVisible] = React.useState(false)
       const [loadError, setLoadError] = React.useState('')
       const [actionError, setActionError] = React.useState('')
       const [draft, setDraft] = React.useState('')
@@ -3799,6 +4130,20 @@ window.__ModuleLoader__.load({
         return function () { controller.abort() }
       }, [reloadKey])
 
+      // B2: wait LOADING_DELAY_MS before showing the loading row so a fast
+      // local read never flashes a spinner. Any status change cancels the timer.
+      React.useEffect(function () {
+        if (status !== 'loading') {
+          setLoadingVisible(false)
+          return function () {}
+        }
+        setLoadingVisible(false)
+        const timer = setTimeout(function () {
+          if (aliveRef.current) setLoadingVisible(true)
+        }, LOADING_DELAY_MS)
+        return function () { clearTimeout(timer) }
+      }, [status, reloadKey])
+
       // Settings load in parallel with the notes. A failed read falls back to
       // the all-off defaults (safe: nothing is scheduled or shown) and leaves a
       // visible banner instead of silently pretending the features are on.
@@ -3904,17 +4249,6 @@ window.__ModuleLoader__.load({
       }, [signatureOpen])
 
       React.useEffect(function () {
-        if (!signatureOpen) return function () {}
-        function onSignatureKeyDown(event) {
-          if (event.key !== 'Escape') return
-          event.preventDefault()
-          setSignatureOpen(false)
-        }
-        document.addEventListener('keydown', onSignatureKeyDown)
-        return function () { document.removeEventListener('keydown', onSignatureKeyDown) }
-      }, [signatureOpen])
-
-      React.useEffect(function () {
         if (settingsOpen) {
           settingsWasOpenRef.current = true
           setSettingsError('')
@@ -3930,17 +4264,6 @@ window.__ModuleLoader__.load({
             settingsButtonRef.current.focus()
           }
         }
-      }, [settingsOpen])
-
-      React.useEffect(function () {
-        if (!settingsOpen) return function () {}
-        function onSettingsKeyDown(event) {
-          if (event.key !== 'Escape') return
-          event.preventDefault()
-          setSettingsOpen(false)
-        }
-        document.addEventListener('keydown', onSettingsKeyDown)
-        return function () { document.removeEventListener('keydown', onSettingsKeyDown) }
       }, [settingsOpen])
 
       // First-use guide: focus its primary action when it opens, restore focus
@@ -3961,18 +4284,6 @@ window.__ModuleLoader__.load({
         }
       }, [onboardingOpen])
 
-      React.useEffect(function () {
-        if (!onboardingOpen) return function () {}
-        function onOnboardingKeyDown(event) {
-          if (event.key !== 'Escape') return
-          event.preventDefault()
-          markOnboardingSeen()
-          setOnboardingOpen(false)
-        }
-        document.addEventListener('keydown', onOnboardingKeyDown)
-        return function () { document.removeEventListener('keydown', onOnboardingKeyDown) }
-      }, [onboardingOpen])
-
       // Import dialog: same keyboard/focus contract as the settings dialog.
       React.useEffect(function () {
         if (importOpen) {
@@ -3989,19 +4300,6 @@ window.__ModuleLoader__.load({
             importButtonRef.current.focus()
           }
         }
-      }, [importOpen])
-
-      React.useEffect(function () {
-        if (!importOpen) return function () {}
-        function onImportKeyDown(event) {
-          if (event.key !== 'Escape') return
-          if (pendingRef.current) return
-          event.preventDefault()
-          setImportOpen(false)
-          setImportFile(null)
-        }
-        document.addEventListener('keydown', onImportKeyDown)
-        return function () { document.removeEventListener('keydown', onImportKeyDown) }
       }, [importOpen])
 
       // Turning folders off hides every folder affordance but keeps the data.
@@ -4100,44 +4398,97 @@ window.__ModuleLoader__.load({
         }
       }, [moveFor])
 
-      // Escape closes whichever menu/dialog is open, even when focus sits
-      // outside it (the dialogs also handle Escape on their own container).
+      // B3/R12: register every open surface in one layer stack. The priority
+      // table mirrors z-order, so Escape can close exactly the topmost surface
+      // even when two are open (e.g. a reminder card over the settings dialog).
       React.useEffect(function () {
-        if (folderMenuFor === '' && noteMenuFor === '' && moveFor === '' && renamingFolderId === '' && deletingFolderId === '' && !folderCreating) {
-          return function () {}
+        const releases = []
+        if (folderCreating) releases.push(pushDialogLayer(DIALOG_LAYER_FOLDER_CREATE))
+        if (noteMenuFor !== '') releases.push(pushDialogLayer(DIALOG_LAYER_NOTE_MENU))
+        if (folderMenuFor !== '') releases.push(pushDialogLayer(DIALOG_LAYER_FOLDER_MENU))
+        if (signatureOpen) releases.push(pushDialogLayer(DIALOG_LAYER_SIGNATURE))
+        if (settingsOpen) releases.push(pushDialogLayer(DIALOG_LAYER_SETTINGS))
+        if (renamingFolderId !== '' || deletingFolderId !== '') releases.push(pushDialogLayer(DIALOG_LAYER_FOLDER_DIALOG))
+        if (moveFor !== '') releases.push(pushDialogLayer(DIALOG_LAYER_MOVE))
+        if (importOpen) releases.push(pushDialogLayer(DIALOG_LAYER_IMPORT))
+        if (onboardingOpen) releases.push(pushDialogLayer(DIALOG_LAYER_ONBOARDING))
+        return function () {
+          for (let index = releases.length - 1; index >= 0; index -= 1) releases[index]()
         }
+      }, [
+        folderCreating,
+        noteMenuFor,
+        folderMenuFor,
+        signatureOpen,
+        settingsOpen,
+        renamingFolderId,
+        deletingFolderId,
+        moveFor,
+        importOpen,
+        onboardingOpen,
+      ])
+
+      // One Escape listener closes only the registered topmost surface. Dialogs
+      // that handle Escape on their own container stop the event first, so this
+      // fallback only runs when focus sits outside every dialog.
+      React.useEffect(function () {
         function onKeyDown(event) {
           if (event.key !== 'Escape' || event.defaultPrevented) return
-          if (moveFor !== '' || renamingFolderId !== '' || deletingFolderId !== '') {
-            if (pendingRef.current) return
-            event.preventDefault()
-            if (moveFor !== '') {
-              setMoveFor('')
-              setMoveCreating(false)
-              setMoveDraft('')
-            }
-            if (renamingFolderId !== '') {
-              setRenamingFolderId('')
-              setRenameFolderValue('')
-            }
-            if (deletingFolderId !== '') setDeletingFolderId('')
+          const top = topMostLayer(DIALOG_LAYERS)
+          if (top === '') return
+          // The reminder overlay owns its own Escape (it lives in a different
+          // React tree); this page-level handler must not consume the event.
+          if (top === DIALOG_LAYER_OVERLAY) return
+          if (pendingRef.current && (top === DIALOG_LAYER_IMPORT || top === DIALOG_LAYER_MOVE || top === DIALOG_LAYER_FOLDER_DIALOG)) {
             return
           }
-          if (folderMenuFor !== '' || noteMenuFor !== '') {
-            event.preventDefault()
+          event.preventDefault()
+          if (top === DIALOG_LAYER_ONBOARDING) {
+            markOnboardingSeen()
+            setOnboardingOpen(false)
+            return
+          }
+          if (top === DIALOG_LAYER_IMPORT) {
+            setImportOpen(false)
+            setImportFile(null)
+            return
+          }
+          if (top === DIALOG_LAYER_SETTINGS) {
+            setSettingsOpen(false)
+            return
+          }
+          if (top === DIALOG_LAYER_SIGNATURE) {
+            setSignatureOpen(false)
+            return
+          }
+          if (top === DIALOG_LAYER_MOVE) {
+            setMoveFor('')
+            setMoveCreating(false)
+            setMoveDraft('')
+            return
+          }
+          if (top === DIALOG_LAYER_FOLDER_DIALOG) {
+            setRenamingFolderId('')
+            setRenameFolderValue('')
+            setDeletingFolderId('')
+            return
+          }
+          if (top === DIALOG_LAYER_FOLDER_MENU) {
             setFolderMenuFor('')
+            return
+          }
+          if (top === DIALOG_LAYER_NOTE_MENU) {
             setNoteMenuFor('')
             return
           }
-          if (folderCreating) {
-            event.preventDefault()
+          if (top === DIALOG_LAYER_FOLDER_CREATE) {
             setFolderCreating(false)
             setNewFolderName('')
           }
         }
         document.addEventListener('keydown', onKeyDown)
         return function () { document.removeEventListener('keydown', onKeyDown) }
-      }, [folderMenuFor, noteMenuFor, moveFor, renamingFolderId, deletingFolderId, folderCreating])
+      }, [])
 
       // A click outside an open menu closes it; toggles are exempt so their own
       // click can open/close without racing this listener.
@@ -5395,27 +5746,21 @@ window.__ModuleLoader__.load({
               )
             : null,
           settingsLoadError
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert', key: 'settings-load-error' },
-                h('span', { className: 'nw-banner-text' },
-                  t('设置读取失败，已使用默认设置（新功能全部关闭）：', 'Could not read settings; using defaults (new features off): ')
-                    + settingsLoadError,
-                ),
-                h('button', {
-                  type: 'button',
-                  className: 'nw-mini',
-                  onClick: function () { setReloadKey(function (value) { return value + 1 }) },
-                }, t('重试', 'Retry')),
-              )
+            ? h(ErrorBanner, {
+                key: 'settings-load-error',
+                t: t,
+                text: t('设置读取失败，已使用默认设置（新功能全部关闭）：', 'Could not read settings; using defaults (new features off): ')
+                  + settingsLoadError,
+                onRetry: function () { setReloadKey(function (value) { return value + 1 }) },
+              })
             : null,
           actionError
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert', key: 'action-error' },
-                h('span', { className: 'nw-banner-text' }, actionError),
-                h('button', {
-                  type: 'button',
-                  className: 'nw-mini',
-                  onClick: function () { setActionError('') },
-                }, t('关闭', 'Dismiss')),
-              )
+            ? h(ErrorBanner, {
+                key: 'action-error',
+                t: t,
+                text: actionError,
+                onDismiss: function () { setActionError('') },
+              })
             : null,
           notice
             ? h('div', { className: 'nw-banner nw-banner-success', role: 'status', key: 'notice' },
@@ -5427,21 +5772,19 @@ window.__ModuleLoader__.load({
                 }, t('关闭', 'Dismiss')),
               )
             : null,
-          status === 'loading'
+          loadingIndicatorVisible(status, loadingVisible)
             ? h('div', { className: 'nw-loading', key: 'loading' },
                 h('span', { className: 'nw-spinner', 'aria-hidden': 'true' }),
                 h('span', null, t('正在读取便签…', 'Loading notes…')),
               )
             : null,
           status === 'error'
-            ? h('div', { className: 'nw-banner nw-banner-error', role: 'alert', key: 'load-error' },
-                h('span', { className: 'nw-banner-text' }, loadError),
-                h('button', {
-                  type: 'button',
-                  className: 'nw-mini',
-                  onClick: function () { setReloadKey(function (value) { return value + 1 }) },
-                }, t('重试', 'Retry')),
-              )
+            ? h(ErrorBanner, {
+                key: 'load-error',
+                t: t,
+                text: loadError,
+                onRetry: function () { setReloadKey(function (value) { return value + 1 }) },
+              })
             : null,
           status === 'ready' && notes.length === 0 ? h(EmptyWall, { key: 'empty', t: t }) : null,
           status === 'ready' && notes.length > 0 && visibleNotes.length === 0

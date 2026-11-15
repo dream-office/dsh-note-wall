@@ -605,7 +605,7 @@ test('enabling folders adds the chips row and keeps selection, not the old panel
 test('cards use one uniform height, clamped text and a bottom action baseline', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   assert.match(source, /\.nw-grid\{[^}]*grid-auto-rows:1fr[^}]*align-items:stretch\}/)
-  assert.match(source, /\.nw-note\{[^}]*height:100%;min-height:248px;overflow:hidden/)
+  assert.match(source, /\.nw-note\{[^}]*height:100%;min-height:240px;overflow:hidden/)
   assert.match(source, /\.nw-note-body\{[^}]*overflow:hidden/)
   assert.match(source, /\.nw-note-text\{[^}]*-webkit-line-clamp:4[^}]*max-height:calc\(1\.72em \* 4\)/)
   assert.match(source, /\.nw-note-foot\{[^}]*margin-top:auto/)
@@ -623,12 +623,12 @@ test('folder chips scroll at 320/360 with a fixed 32px + and no-wrap chips', asy
   assert.match(source, /\.nw-chip-input\{[^}]*height:32px/)
   assert.match(source, /\.nw-menu-item\{[^}]*height:32px/)
   assert.match(source, /\.nw-note\{[^}]*position:relative/)
-  assert.match(source, /\.nw-note-menu\{position:absolute[^}]*right:10px;bottom:10px/)
+  assert.match(source, /\.nw-note-menu\{position:absolute[^}]*right:8px;bottom:8px/)
   assert.match(source, /\.nw-dialog-actions \.nw-mini,[^{]*\{height:32px/)
   assert.match(source, /@media \(max-width:420px\)\{[\s\S]*?\.nw-chip-input\{width:132px/)
   // The existing 32px toolbar controls are untouched.
   assert.match(source, /\.nw-toolbar \.nw-mini\{[^}]*height:32px[^}]*white-space:nowrap/)
-  assert.match(source, /\.nw-select-toggle\{[^}]*padding:0 14px;gap:8px/)
+  assert.match(source, /\.nw-select-toggle\{[^}]*padding:0 12px;gap:8px/)
 })
 
 test('folder chips list 全部 / 未分类 / each folder with counts and a + add button', () => {
@@ -1744,4 +1744,354 @@ test('the shell overlay renders nothing while the alarm is disabled or nothing i
 
   hook.publishSettings(cloneDefaultSettings())
   assert.equal(hook.ReminderOverlay({ ctx: undefined }), null)
+})
+
+// --- v1.4.0 UI unification (Lumen + warm apricot) ---------------------------
+
+function cssValueList(css, property) {
+  const values = []
+  const pattern = new RegExp('(?:[;{])' + property + ':([^;}]+)', 'g')
+  let match = pattern.exec(css)
+  while (match) {
+    values.push(match[1].trim())
+    match = pattern.exec(css)
+  }
+  return values
+}
+
+function spacingTokens(value) {
+  return value.split(/\s+/)
+    .filter(function (part) { return part.length > 0 && part !== 'auto' })
+    .map(function (part) { return Number(part.replace('px', '')) })
+}
+
+function relativeLuminance(hex) {
+  const channels = [1, 3, 5].map(function (start) {
+    const value = parseInt(hex.slice(start, start + 2), 16) / 255
+    return value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4)
+  })
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+}
+
+function contrastRatio(left, right) {
+  const a = relativeLuminance(left)
+  const b = relativeLuminance(right)
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+}
+
+test('the light theme keeps host surfaces and adds only the apricot accent', () => {
+  assert.deepEqual(plain(hook.NW_PALETTE), {
+    paper: '#FDF5EE',
+    ink: '#2D2A26',
+    accent: '#E8A87C',
+    accentInk: '#7A4418',
+    muted: '#6B5F52',
+  })
+  const css = hook.getCss()
+  for (const line of [
+    '--nw-ink:var(--dsw-alias-label-primary)',
+    '--nw-muted:var(--dsw-alias-label-secondary)',
+    '--nw-surface:var(--dsw-alias-bg-layer-1)',
+    '--nw-surface-2:var(--dsw-alias-bg-layer-2)',
+    '--nw-line:var(--dsw-alias-border-l2)',
+    '--nw-line-soft:var(--dsw-alias-border-l1)',
+    '--nw-accent-ink:#7A4418',
+    '--nw-project-accent:#E8A87C',
+    '--nw-on-accent:#2D2A26',
+  ]) {
+    assert.ok(css.indexOf(line) >= 0, 'missing token ' + line)
+  }
+  assert.doesNotMatch(css, /background:var\(--nw-paper\)/, 'paper must not replace a host surface')
+  assert.match(css, /\.nw-root\{[^}]*background:var\(--dsw-alias-bg-base\)[^}]*color:var\(--dsw-alias-label-primary\)/)
+  const darkStart = css.indexOf('.nw-dark{')
+  const darkBlock = css.slice(darkStart, css.indexOf('}', darkStart) + 1)
+  assert.match(darkBlock, /--nw-ink:var\(--dsw-alias-label-primary\)/)
+  assert.match(darkBlock, /--nw-paper:var\(--dsw-alias-bg-base\)/)
+  assert.match(darkBlock, /--nw-surface:var\(--dsw-alias-bg-layer-1\)/)
+  assert.match(darkBlock, /--nw-focus:var\(--dsw-alias-brand-primary\)/)
+  assert.doesNotMatch(darkBlock, /#[0-9A-Fa-f]{6}/, 'no dark color may be hardcoded')
+  assert.doesNotMatch(css, /backdrop-filter/, 'no glass in the host panel')
+  assert.doesNotMatch(css, /#5B57F0|#8B87FF/, 'the old signature colors are gone')
+
+  // Note content tones are the plugin's own artwork and must stay untouched.
+  for (const tone of ['#F0C24B', '#F2A6BC', '#8FC4F0', '#7FD3C0', '#B79CF0', '#E4D3AE']) {
+    assert.ok(css.indexOf(tone) >= 0, 'pastel tone changed: ' + tone)
+  }
+
+  // Settings dialog: solid host surface + shadow, never glass.
+  assert.match(css, /\.nw-settings\{[^}]*background:var\(--nw-surface\)[^}]*box-shadow:/)
+
+  // Accent is recognition only; selected chips use deep ink on apricot.
+  assert.match(css, /\.nw-chip\[aria-pressed="true"\]\{[^}]*background:var\(--nw-project-accent\)[^}]*color:var\(--nw-on-accent\)/)
+  assert.match(css, /\.nw-mini-primary\{[^}]*background:var\(--nw-project-accent\)[^}]*color:var\(--nw-on-accent\)/)
+  assert.match(css, /\.nw-add\{[^}]*background:var\(--nw-project-accent\)[^}]*color:var\(--nw-on-accent\)/)
+
+  // Signature: same 10px square, project color, host brand in dark.
+  assert.match(css, /\.nw-signature\{[^}]*color:var\(--nw-accent-ink\)/)
+  assert.match(css, /\.nw-signature-mark\{width:10px;height:10px;border-radius:3px;background:var\(--nw-project-accent\)/)
+  assert.doesNotMatch(css, /\.nw-dark \.nw-signature-mark/)
+  assert.match(css, /\.nw-dark\{[^}]*--nw-project-accent:var\(--dsw-alias-brand-primary\)/)
+})
+
+test('light palette text roles meet WCAG contrast on paper', () => {
+  const palette = hook.NW_PALETTE
+  assert.ok(contrastRatio(palette.ink, palette.paper) >= 7, 'ink on paper')
+  assert.ok(contrastRatio(palette.muted, palette.paper) >= 4.5, 'muted on paper')
+  assert.ok(contrastRatio(palette.accentInk, palette.paper) >= 4.5, 'accent ink on paper')
+})
+
+test('sizes and radii are normalized to the Lumen token set', () => {
+  const css = hook.getCss() + hook.getOverlayCss()
+
+  const fontSizes = cssValueList(css, 'font-size').map(function (value) {
+    return Number(value.replace('px', ''))
+  })
+  assert.ok(fontSizes.length > 0)
+  for (const size of fontSizes) {
+    assert.ok([11, 12, 13, 15, 20].indexOf(size) >= 0, 'unexpected font size: ' + size)
+  }
+  // 13px body density is preserved, not collapsed to a 12px UI.
+  assert.match(css, /\.nw-root\{[^}]*font-size:13px/)
+
+  // Only the four control heights survive; image/art sizes are not controls.
+  assert.match(css, /\.nw-search\{[^}]*height:32px[^}]*border-radius:10px/)
+  assert.match(css, /\.nw-filter\{height:32px[^}]*border-radius:10px/)
+  assert.match(css, /\.nw-mini\{height:28px/)
+  assert.match(css, /\.nw-iconbtn\{[^}]*width:28px;height:28px/)
+  assert.match(css, /\.nw-motion-toggle\{[^}]*height:28px/)
+  assert.match(css, /\.nw-tag-input\{[^}]*height:32px/)
+  assert.match(css, /\.nw-link-field\{[^}]*height:32px/)
+  assert.match(css, /\.nw-attach-btn\{[^}]*height:32px/)
+  assert.match(css, /\.nw-add\{[^}]*height:36px/)
+  assert.match(css, /\.nw-move-option\{[^}]*min-height:44px/)
+  assert.match(css, /\.nw-dialog-input\{height:32px/)
+  assert.match(css, /\.nw-chip\{[^}]*height:32px/)
+  assert.match(css, /\.nw-cat-chip\{height:28px/)
+  assert.match(css, /\.nw-signature\{[^}]*height:28px/)
+  assert.match(css, /\.nw-ov-btn\{[^}]*height:28px/)
+
+  // Card / dialog / overlay cards normalize to radius 20 and min-height 240.
+  assert.match(css, /\.nw-note\{[^}]*min-height:240px[^}]*border-radius:20px/)
+  assert.match(css, /\.nw-settings\{[^}]*border-radius:20px/)
+  assert.match(css, /\.nw-dialog\{[^}]*border-radius:20px/)
+  assert.match(css, /\.nw-empty\{[^}]*border-radius:20px/)
+  assert.match(css, /\.nw-ov-card\{[^}]*border-radius:20px/)
+
+  // No legacy radii (8/9/16/18/22) or percent circles remain.
+  assert.doesNotMatch(css, /border-radius:(?:4|6|8|9|16|18|22)px/)
+  assert.doesNotMatch(css, /border-radius:50%/)
+
+  // Spacing only uses the 4/8/12/16/24 rhythm (0 means "none").
+  const allowedSpacing = [0, 4, 8, 12, 16, 24]
+  for (const gap of cssValueList(css, 'gap')) {
+    for (const token of spacingTokens(gap)) {
+      assert.ok(allowedSpacing.indexOf(token) >= 0, 'unexpected gap: ' + gap)
+    }
+  }
+  for (const padding of cssValueList(css, 'padding')) {
+    for (const token of spacingTokens(padding)) {
+      assert.ok(allowedSpacing.indexOf(token) >= 0, 'unexpected padding: ' + padding)
+    }
+  }
+})
+
+test('every focusable control family has a visible focus treatment', () => {
+  const css = hook.getCss() + hook.getOverlayCss()
+  const selectors = [
+    'nw-search',
+    'nw-filter',
+    'nw-mini',
+    'nw-iconbtn',
+    'nw-add',
+    'nw-tag-input',
+    'nw-link-field',
+    'nw-attach-btn',
+    'nw-swatch',
+    'nw-chip',
+    'nw-chip-input',
+    'nw-menu-item',
+    'nw-cat-chip',
+    'nw-dialog-input',
+    'nw-move-option',
+    'nw-signature',
+    'nw-ov-btn',
+    'nw-set-range',
+    'nw-select-check',
+    'nw-note',
+    'nw-note-thumb',
+    'nw-note-link',
+    'nw-note-image',
+  ]
+  for (const selector of selectors) {
+    assert.ok(
+      css.indexOf('.' + selector + ':focus-visible') >= 0
+        || css.indexOf('.' + selector + ':focus-within') >= 0,
+      'missing focus treatment for ' + selector,
+    )
+  }
+  for (const selector of ['nw-set-row input', 'nw-radio-row input', 'nw-set-inline select', 'nw-select-bar select', 'nw-edit-remind input']) {
+    assert.ok(css.indexOf('.' + selector + ':focus-visible') >= 0, 'missing focus treatment for ' + selector)
+  }
+  assert.match(css, /\.nw-root :focus-visible,[^{]*:focus-visible[^{]*\{outline:2px solid var\(--nw-focus\)/)
+})
+
+test('the error banner is a banner variant with icon, text and one action', () => {
+  const retryCalls = []
+  const bannerNodes = collect(hook.ErrorBanner({
+    t: zh,
+    text: '读取失败，请重试。',
+    onRetry() { retryCalls.push('retry') },
+  }))
+  const banner = bannerNodes[0]
+  assert.equal(banner.props.role, 'alert')
+  assert.equal(banner.props.className, 'nw-banner nw-banner-error')
+  assert.ok(byClass(bannerNodes, 'nw-banner-icon'), 'error icon missing')
+  assert.equal(textContent(byClass(bannerNodes, 'nw-banner-text')), '读取失败，请重试。')
+  const retry = bannerNodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '重试'
+  })
+  assert.ok(retry, 'retry action missing')
+  retry.props.onClick()
+  assert.deepEqual(retryCalls, ['retry'])
+  assert.equal(bannerNodes.some(function (node) {
+    return node.props && typeof node.props.className === 'string' && node.props.className.indexOf('nw-note') >= 0
+  }), false, 'the error variant must not open a new card')
+
+  const dismissCalls = []
+  const dismissNodes = collect(hook.ErrorBanner({
+    t: zh,
+    text: '保存失败。',
+    onDismiss() { dismissCalls.push('dismiss') },
+  }))
+  const dismiss = dismissNodes.find(function (node) {
+    return node.type === 'button' && textContent(node) === '关闭'
+  })
+  assert.ok(dismiss, 'dismiss action missing')
+  dismiss.props.onClick()
+  assert.deepEqual(dismissCalls, ['dismiss'])
+
+  const css = hook.getCss()
+  assert.match(css, /\.nw-banner-error\{[^}]*state-error-secondary[^}]*state-error-primary/)
+  assert.match(css, /\.nw-banner-icon\{/)
+  assert.match(css, /\.nw-dialog-error\{[^}]*display:flex/)
+})
+
+test('disabled controls dim predictably and never invite interaction', () => {
+  const css = hook.getCss()
+  assert.match(css, /\.nw-root button:disabled,[\s\S]*?opacity:\.5;cursor:not-allowed/)
+  assert.match(css, /\.nw-mini:disabled\{opacity:\.5;cursor:not-allowed\}/)
+  assert.match(css, /\.nw-add:hover:not\(:disabled\)/)
+  assert.match(css, /\.nw-move-option:focus-visible/)
+})
+
+test('the loading row waits 300ms and the gate is wired into the page', async () => {
+  assert.equal(hook.LOADING_DELAY_MS, 300)
+  assert.equal(hook.loadingIndicatorVisible('loading', false), false, 'a fast read shows nothing')
+  assert.equal(hook.loadingIndicatorVisible('loading', true), true)
+  assert.equal(hook.loadingIndicatorVisible('ready', true), false)
+  assert.equal(hook.loadingIndicatorVisible('error', true), false)
+
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /loadingIndicatorVisible\(status, loadingVisible\)/)
+  assert.match(source, /setTimeout\(function \(\) \{[\s\S]{0,160}\}, LOADING_DELAY_MS\)/)
+  assert.match(hook.getCss(), /\.nw-loading\{[^}]*padding:24px 0/)
+})
+
+test('Escape resolves exactly the topmost surface by z-order', () => {
+  assert.equal(hook.topMostLayer([]), '')
+  assert.equal(hook.topMostLayer(['settings']), 'settings')
+  assert.equal(hook.topMostLayer(['signature', 'settings']), 'settings', 'the modal is above the popover')
+  assert.equal(hook.topMostLayer(['settings', 'reminder-overlay']), 'reminder-overlay', 'the host overlay layer is above in-page dialogs')
+  assert.equal(hook.topMostLayer(['signature', 'import', 'reminder-overlay']), 'reminder-overlay')
+  assert.ok(hook.DIALOG_LAYER_PRIORITY.settings < hook.DIALOG_LAYER_PRIORITY['reminder-overlay'])
+  assert.equal(hook.topMostLayer(['mystery', 'settings']), 'settings', 'unknown layers never win')
+})
+
+test('the settings dialog traps focus, closes on Escape/backdrop and wires focus return', async () => {
+  const calls = []
+  const tree = hook.SettingsPanel({
+    settings: cloneDefaultSettings(),
+    t: zh,
+    busy: false,
+    error: '',
+    notice: '',
+    onSave() {},
+    onReset() {},
+    onClose() { calls.push('close') },
+  })
+  const nodes = collect(tree)
+  const dialog = byId(nodes, 'nw-settings-panel')
+  assert.ok(dialog, 'settings dialog missing')
+  assert.equal(dialog.props.role, 'dialog')
+  assert.equal(dialog.props['aria-modal'], 'true')
+  assert.equal(typeof dialog.props.onKeyDown, 'function')
+
+  dialog.props.onKeyDown({ key: 'Escape', preventDefault() {}, currentTarget: dialog })
+  assert.deepEqual(calls, ['close'], 'Escape closes the topmost settings dialog')
+
+  const first = { focus() { calls.push('focus-first') } }
+  const last = { focus() { calls.push('focus-last') } }
+  client.document.activeElement = last
+  dialog.props.onKeyDown({
+    key: 'Tab',
+    shiftKey: false,
+    preventDefault() {},
+    currentTarget: { querySelectorAll() { return [first, last] } },
+  })
+  assert.ok(calls.indexOf('focus-first') >= 0, 'Tab wraps from the last control to the first')
+  client.document.activeElement = first
+  dialog.props.onKeyDown({
+    key: 'Tab',
+    shiftKey: true,
+    preventDefault() {},
+    currentTarget: { querySelectorAll() { return [first, last] } },
+  })
+  assert.ok(calls.indexOf('focus-last') >= 0, 'Shift+Tab wraps from the first control to the last')
+
+  const backdrop = nodes.find(function (node) {
+    return node.props && node.props.className === 'nw-settings-backdrop'
+  })
+  assert.ok(backdrop, 'settings backdrop missing')
+  backdrop.props.onMouseDown({ target: backdrop, currentTarget: backdrop })
+  assert.ok(calls.filter(function (call) { return call === 'close' }).length >= 2, 'backdrop click closes')
+  backdrop.props.onMouseDown({ target: dialog, currentTarget: backdrop })
+  assert.equal(calls.filter(function (call) { return call === 'close' }).length, 2, 'inside clicks never close')
+
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /settingsOpen[\s\S]{0,500}settingsCloseRef\.current[\s\S]{0,120}\.focus\(\)/, 'focus enters the dialog')
+  assert.match(source, /settingsWasOpenRef\.current[\s\S]{0,260}settingsButtonRef\.current[\s\S]{0,120}\.focus\(\)/, 'focus returns to the trigger')
+  assert.match(source, /SETTINGS_PANEL_ID,[\s\S]{0,240}onKeyDown: onKeyDown/, 'the dialog carries the keyboard contract')
+})
+
+test('focus trap helpers and edit-cancel focus are testable units', () => {
+  const first = { name: 'first' }
+  const middle = { name: 'middle' }
+  const last = { name: 'last' }
+  const items = [first, middle, last]
+  assert.equal(hook.focusTrapTarget(items, last, false), first, 'Tab wraps forward')
+  assert.equal(hook.focusTrapTarget(items, first, true), last, 'Shift+Tab wraps backward')
+  assert.equal(hook.focusTrapTarget(items, middle, false), null, 'no wrap in the middle')
+  assert.equal(hook.focusTrapTarget([], first, false), null)
+
+  let focused = 0
+  const card = { focus() { focused += 1 } }
+  assert.equal(hook.editFocusTarget(false, null, card), null, 'a fresh card never steals focus')
+  assert.equal(hook.editFocusTarget(true, { id: 'editing' }, card), null, 'still editing keeps the editor focus')
+  assert.equal(hook.editFocusTarget(true, null, card), card, 'closing the editor targets the card')
+  card.focus()
+  assert.equal(focused, 1)
+
+  const tree = hook.NoteCard(baseProps(sampleNote()))
+  assert.ok(tree.props.ref, 'the card exposes a ref for focus return')
+})
+
+test('the reminder overlay registers as the top layer and closes on Esc/outside', async () => {
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /pushDialogLayer\(DIALOG_LAYER_OVERLAY\)/)
+  assert.match(source, /isTopDialogLayer\(DIALOG_LAYER_OVERLAY\)/)
+  assert.match(source, /document\.addEventListener\('mousedown', onPointerDown\)/)
+  assert.match(source, /data-nw-overlay-card/)
+  assert.match(source, /returnFocusRef/)
+  assert.match(hook.getOverlayCss(), /\.nw-ov-layer\{[^}]*z-index:950/)
+  assert.match(source, /nw-settings-page' \+ \(colorScheme === 'dark' \? ' nw-dark' : ''\)/, 'the settings page follows the host scheme')
 })
