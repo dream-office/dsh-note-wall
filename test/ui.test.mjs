@@ -1801,15 +1801,18 @@ test('the light theme keeps host surfaces and adds only the apricot accent', () 
   ]) {
     assert.ok(css.indexOf(line) >= 0, 'missing token ' + line)
   }
+  assert.doesNotMatch(css, /--nw-paper/, 'the unused paper token must be gone')
   assert.doesNotMatch(css, /background:var\(--nw-paper\)/, 'paper must not replace a host surface')
   assert.match(css, /\.nw-root\{[^}]*background:var\(--dsw-alias-bg-base\)[^}]*color:var\(--dsw-alias-label-primary\)/)
   const darkStart = css.indexOf('.nw-dark{')
   const darkBlock = css.slice(darkStart, css.indexOf('}', darkStart) + 1)
+  assert.match(darkBlock, /--nw-project-accent:#E8A87C/)
+  assert.match(darkBlock, /--nw-accent-ink:color-mix\(in srgb,#E8A87C 62%,#fff\)/)
+  assert.match(darkBlock, /--nw-link:var\(--nw-accent-ink\)/)
+  assert.match(darkBlock, /--nw-focus:var\(--nw-accent-ink\)/)
   assert.match(darkBlock, /--nw-ink:var\(--dsw-alias-label-primary\)/)
-  assert.match(darkBlock, /--nw-paper:var\(--dsw-alias-bg-base\)/)
   assert.match(darkBlock, /--nw-surface:var\(--dsw-alias-bg-layer-1\)/)
-  assert.match(darkBlock, /--nw-focus:var\(--dsw-alias-brand-primary\)/)
-  assert.doesNotMatch(darkBlock, /#[0-9A-Fa-f]{6}/, 'no dark color may be hardcoded')
+  assert.doesNotMatch(darkBlock, /--nw-(surface|ink|line|muted):#[0-9A-Fa-f]{6}/, 'dark surfaces/text stay host-driven')
   assert.doesNotMatch(css, /backdrop-filter/, 'no glass in the host panel')
   assert.doesNotMatch(css, /#5B57F0|#8B87FF/, 'the old signature colors are gone')
 
@@ -1826,11 +1829,11 @@ test('the light theme keeps host surfaces and adds only the apricot accent', () 
   assert.match(css, /\.nw-mini-primary\{[^}]*background:var\(--nw-project-accent\)[^}]*color:var\(--nw-on-accent\)/)
   assert.match(css, /\.nw-add\{[^}]*background:var\(--nw-project-accent\)[^}]*color:var\(--nw-on-accent\)/)
 
-  // Signature: same 10px square, project color, host brand in dark.
+  // Signature: same 10px square, project color in both themes.
   assert.match(css, /\.nw-signature\{[^}]*color:var\(--nw-accent-ink\)/)
   assert.match(css, /\.nw-signature-mark\{width:10px;height:10px;border-radius:3px;background:var\(--nw-project-accent\)/)
   assert.doesNotMatch(css, /\.nw-dark \.nw-signature-mark/)
-  assert.match(css, /\.nw-dark\{[^}]*--nw-project-accent:var\(--dsw-alias-brand-primary\)/)
+  assert.match(css, /\.nw-dark\{[^}]*--nw-project-accent:#E8A87C/)
 })
 
 test('light palette text roles meet WCAG contrast on paper', () => {
@@ -1848,7 +1851,8 @@ test('sizes and radii are normalized to the Lumen token set', () => {
   })
   assert.ok(fontSizes.length > 0)
   for (const size of fontSizes) {
-    assert.ok([11, 12, 13, 15, 20].indexOf(size) >= 0, 'unexpected font size: ' + size)
+    // 11.5px is the signature's frozen policy value (shape/size unchanged).
+    assert.ok([11, 11.5, 12, 13, 15, 20].indexOf(size) >= 0, 'unexpected font size: ' + size)
   }
   // 13px body density is preserved, not collapsed to a 12px UI.
   assert.match(css, /\.nw-root\{[^}]*font-size:13px/)
@@ -1867,7 +1871,10 @@ test('sizes and radii are normalized to the Lumen token set', () => {
   assert.match(css, /\.nw-dialog-input\{height:32px/)
   assert.match(css, /\.nw-chip\{[^}]*height:32px/)
   assert.match(css, /\.nw-cat-chip\{height:28px/)
-  assert.match(css, /\.nw-signature\{[^}]*height:28px/)
+  assert.match(css, /\.nw-signature\{[^}]*height:24px/)
+  assert.match(css, /\.nw-signature\{[^}]*border-radius:6px/)
+  assert.match(css, /\.nw-signature\{[^}]*font-size:11\.5px/)
+  assert.match(css, /\.nw-signature\{[^}]*gap:7px/)
   assert.match(css, /\.nw-ov-btn\{[^}]*height:28px/)
 
   // Card / dialog / overlay cards normalize to radius 20 and min-height 240.
@@ -1877,18 +1884,21 @@ test('sizes and radii are normalized to the Lumen token set', () => {
   assert.match(css, /\.nw-empty\{[^}]*border-radius:20px/)
   assert.match(css, /\.nw-ov-card\{[^}]*border-radius:20px/)
 
-  // No legacy radii (8/9/16/18/22) or percent circles remain.
-  assert.doesNotMatch(css, /border-radius:(?:4|6|8|9|16|18|22)px/)
+  // No legacy radii (8/9/16/18/22) or percent circles remain. The signature
+  // outer shell is frozen at its historic 6px by the signature policy.
+  const withoutSignature = css.replace(/\.nw-signature\{[^}]*\}/g, '')
+  assert.doesNotMatch(withoutSignature, /border-radius:(?:4|6|8|9|16|18|22)px/)
   assert.doesNotMatch(css, /border-radius:50%/)
 
   // Spacing only uses the 4/8/12/16/24 rhythm (0 means "none").
+  // The signature outer shell keeps its historical 7px gap by policy.
   const allowedSpacing = [0, 4, 8, 12, 16, 24]
-  for (const gap of cssValueList(css, 'gap')) {
+  for (const gap of cssValueList(withoutSignature, 'gap')) {
     for (const token of spacingTokens(gap)) {
       assert.ok(allowedSpacing.indexOf(token) >= 0, 'unexpected gap: ' + gap)
     }
   }
-  for (const padding of cssValueList(css, 'padding')) {
+  for (const padding of cssValueList(withoutSignature, 'padding')) {
     for (const token of spacingTokens(padding)) {
       assert.ok(allowedSpacing.indexOf(token) >= 0, 'unexpected padding: ' + padding)
     }
@@ -2061,6 +2071,55 @@ test('the settings dialog traps focus, closes on Escape/backdrop and wires focus
   assert.match(source, /settingsOpen[\s\S]{0,500}settingsCloseRef\.current[\s\S]{0,120}\.focus\(\)/, 'focus enters the dialog')
   assert.match(source, /settingsWasOpenRef\.current[\s\S]{0,260}settingsButtonRef\.current[\s\S]{0,120}\.focus\(\)/, 'focus returns to the trigger')
   assert.match(source, /SETTINGS_PANEL_ID,[\s\S]{0,240}onKeyDown: onKeyDown/, 'the dialog carries the keyboard contract')
+})
+
+test('the import dialog traps focus and Esc only closes the topmost surface', () => {
+  const calls = []
+  const tree = hook.ImportDialog({
+    t: zh,
+    busy: false,
+    file: { name: 'note-wall-backup.zip' },
+    mode: 'merge',
+    applySettings: false,
+    error: '',
+    onClose() { calls.push('close') },
+    onChangeMode() {},
+    onChangeApplySettings() {},
+    onConfirm() {},
+  })
+  const nodes = collect(tree)
+  const dialog = byId(nodes, 'nw-import-dialog')
+  assert.ok(dialog, 'import dialog missing')
+  assert.equal(dialog.props.role, 'dialog')
+  assert.equal(dialog.props['aria-modal'], 'true')
+  assert.equal(typeof dialog.props.onKeyDown, 'function')
+
+  const release = hook.pushDialogLayer('reminder-overlay')
+  dialog.props.onKeyDown({ key: 'Escape', preventDefault() {}, currentTarget: dialog })
+  assert.deepEqual(calls, [], 'Esc must not close a dialog under the topmost layer')
+  release()
+
+  dialog.props.onKeyDown({ key: 'Escape', preventDefault() {}, currentTarget: dialog })
+  assert.deepEqual(calls, ['close'], 'Esc closes the topmost import dialog')
+
+  const first = { focus() { calls.push('focus-first') } }
+  const last = { focus() { calls.push('focus-last') } }
+  client.document.activeElement = last
+  dialog.props.onKeyDown({
+    key: 'Tab',
+    shiftKey: false,
+    preventDefault() {},
+    currentTarget: { querySelectorAll() { return [first, last] } },
+  })
+  assert.ok(calls.indexOf('focus-first') >= 0, 'Tab wraps from the last control to the first')
+  client.document.activeElement = first
+  dialog.props.onKeyDown({
+    key: 'Tab',
+    shiftKey: true,
+    preventDefault() {},
+    currentTarget: { querySelectorAll() { return [first, last] } },
+  })
+  assert.ok(calls.indexOf('focus-last') >= 0, 'Shift+Tab wraps from the first control to the last')
 })
 
 test('focus trap helpers and edit-cancel focus are testable units', () => {

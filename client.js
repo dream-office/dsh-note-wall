@@ -1755,7 +1755,6 @@ window.__ModuleLoader__.load({
 .nw-root,.nw-settings-page,.nw-ov-layer{
   /* Project color is recognition/accent only; surfaces, cards, borders and
      body text stay on the host --dsw-alias-* tokens (see the design hard rule). */
-  --nw-paper:${NW_PALETTE.paper};
   --nw-ink:var(--dsw-alias-label-primary);
   --nw-muted:var(--dsw-alias-label-secondary);
   --nw-accent-ink:${NW_PALETTE.accentInk};
@@ -1773,18 +1772,19 @@ window.__ModuleLoader__.load({
   --nw-scrim:color-mix(in srgb,var(--dsw-alias-bg-base) 55%,transparent);
 }
 .nw-dark{
-  --nw-paper:var(--dsw-alias-bg-base);
+  /* Apricot is project identity, not a dark surface: keep the accent, derive
+     only the ink from it; every surface/text/border still comes from the host. */
+  --nw-project-accent:#E8A87C;
+  --nw-accent-ink:color-mix(in srgb,#E8A87C 62%,#fff);
+  --nw-link:var(--nw-accent-ink);
+  --nw-focus:var(--nw-accent-ink);
   --nw-ink:var(--dsw-alias-label-primary);
   --nw-muted:var(--dsw-alias-label-secondary);
-  --nw-accent-ink:var(--dsw-alias-brand-primary);
-  --nw-project-accent:var(--dsw-alias-brand-primary);
   --nw-surface:var(--dsw-alias-bg-layer-1);
   --nw-surface-2:var(--dsw-alias-bg-layer-2);
   --nw-hover:var(--dsw-alias-interactive-bg-hover);
   --nw-line:var(--dsw-alias-border-l2);
   --nw-line-soft:var(--dsw-alias-border-l1);
-  --nw-focus:var(--dsw-alias-brand-primary);
-  --nw-link:var(--dsw-alias-link);
   --nw-scrim:color-mix(in srgb,var(--dsw-alias-bg-base) 55%,transparent);
 }
 `
@@ -2042,7 +2042,7 @@ window.__ModuleLoader__.load({
 .nw-empty-hint{max-width:420px;font-size:12px;line-height:1.7;color:var(--nw-muted)}
 .nw-page-foot{display:flex;align-items:flex-end;justify-content:flex-start;margin-top:auto;padding-top:8px}
 .nw-signature-wrap{position:relative;display:inline-flex;flex-direction:column;align-items:flex-start;gap:8px;max-width:100%}
-.nw-signature{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 4px;border:none;border-radius:10px;background:transparent;color:var(--nw-accent-ink);font-family:inherit;font-size:12px;letter-spacing:.02em;opacity:.55;cursor:pointer;user-select:none}
+.nw-signature{display:inline-flex;align-items:center;gap:7px;height:24px;padding:0 4px;border:none;border-radius:6px;background:transparent;color:var(--nw-accent-ink);font-family:inherit;font-size:11.5px;letter-spacing:.02em;opacity:.55;cursor:pointer;user-select:none}
 .nw-signature:hover,.nw-signature:focus-visible{opacity:1}
 .nw-signature:focus-visible{outline:2px solid var(--nw-focus);outline-offset:2px}
 .nw-signature-mark{width:10px;height:10px;border-radius:3px;background:var(--nw-project-accent);flex:none}
@@ -3531,6 +3531,15 @@ window.__ModuleLoader__.load({
       const mode = props.mode === 'replace' ? 'replace' : 'merge'
       const fileName = props.file && typeof props.file.name === 'string' ? props.file.name : ''
 
+      function onKeyDown(event) {
+        if (event.key === 'Escape' && !isTopDialogLayer(DIALOG_LAYER_IMPORT)) return
+        if (busy) {
+          if (event.key === 'Escape' && typeof event.preventDefault === 'function') event.preventDefault()
+          return
+        }
+        handleDialogKeyDown(event, { onClose: props.onClose })
+      }
+
       return h('div', {
         className: 'nw-settings-backdrop',
         onMouseDown: function (event) {
@@ -3543,6 +3552,7 @@ window.__ModuleLoader__.load({
           role: 'dialog',
           'aria-modal': 'true',
           'aria-labelledby': IMPORT_DIALOG_TITLE_ID,
+          onKeyDown: onKeyDown,
         },
           h('div', { className: 'nw-settings-head' },
             h('h3', { id: IMPORT_DIALOG_TITLE_ID, className: 'nw-settings-title' },
